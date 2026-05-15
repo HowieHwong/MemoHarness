@@ -1,0 +1,139 @@
+{
+  "providers": {
+    "openrouter": {
+      "client": "openai",
+      "api_key_env": "sk-or-v1-xxxxxx",
+      "api_base": "https://openrouter.ai/api/v1"
+    },
+    "openai": {
+      "client": "openai",
+      "api_key_env": "sk-proj-xxxxx"
+    }
+  },
+  "active_model": "gpt-5.3-codex",
+  "models": {
+    "deepseek-v3.2": {
+      "provider": "openrouter",
+      "name": "deepseek/deepseek-v3.2",
+      "diagnostics_model": "deepseek/deepseek-v3.2",
+      "controller_model": "deepseek/deepseek-v3.2"
+    },
+    "qwen3.5-397b": {
+      "provider": "openrouter",
+      "name": "qwen/qwen3.5-397b-a17b",
+      "diagnostics_model": "qwen/qwen3.5-397b-a17b",
+      "controller_model": "qwen/qwen3.5-397b-a17b"
+    },
+    "glm-5": {
+      "provider": "openrouter",
+      "name": "z-ai/glm-5.1",
+      "diagnostics_model": "z-ai/glm-5.1",
+      "controller_model": "z-ai/glm-5.1"
+    },
+    "gemini-3.1-pro": {
+      "provider": "openrouter",
+      "name": "google/gemini-3.1-pro-preview",
+      "diagnostics_model": "google/gemini-3.1-pro-preview",
+      "controller_model": "google/gemini-3.1-pro-preview"
+    },
+    "gpt-5.3-codex": {
+      "provider": "openai",
+      "name": "gpt-5.3-codex",
+      "diagnostics_model": "gpt-5.3-codex",
+      "controller_model": "gpt-5.3-codex"
+    },
+    "claude-sonnet-4.5": {
+      "provider": "openrouter",
+      "name": "anthropic/claude-sonnet-4-5",
+      "diagnostics_model": "anthropic/claude-sonnet-4-5",
+      "controller_model": "anthropic/claude-sonnet-4-5"
+    }
+  },
+  "experiment": {
+    "dataset": "terminal-bench@2.0",
+    "iterations": 20,
+    "harness_path": "configs/harness_terminal.py",
+    "bank_dir": "artifacts",
+    "jobs_dir": "jobs",
+    "distill_every": 5,
+    "min_consecutive_failures": 3,
+    "train_split": 0.8,
+    "train_task_limit": 1,
+    "seed": 42,
+    "n_concurrent": 3,
+    "agent_import_path": "memoharness.harbor.codex_agent:MemoHarnessCodexAgent",
+    "eval_only": false,
+    "eval_after_train": true,
+    "harbor_agent_timeout_seconds": 3600.0,
+    "verifier_timeout_seconds": 3600.0,
+    "disable_harbor_verifier_retry": false,
+    "extra_harbor_args": [
+      "--env",
+      "daytona"
+    ],
+    "daytona": {
+      "api_keys": [
+        "dtn_xxxx"
+      ],
+      "per_key_concurrency": 3,
+      "max_tasks_per_shard": 3,
+      "exclusive_task_ids": [
+        "large-scale-text-editing",
+        "rstan-to-pystan"
+      ],
+      "allow_retries": false,
+      "stop_on_timeout_per_task": true,
+      "shard_timeout_seconds": 18000.0,
+      "shard_kill_grace_seconds": 5.0,
+      "disk_limit_retry_limit": -1,
+      "retry_wait_seconds": 60,
+      "connectivity_retry_limit": 3,
+      "timeout_retry_limit": 1,
+      "key_cooldown_seconds": 60
+    }
+  },
+  "harness": {
+    "scorer": "llm_judge",
+    "embedder": "openai",
+    "diagnostics": "llm",
+    "tool_protocol": "bash_tags",
+    "agent_runtime": "harbor_codex",
+    "codex_bundle_path": "configs/harness_codex",
+    "controller": "codex",
+    "controller_command": "codex",
+    "controller_args": ["exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--color", "never", "-"],
+    "controller_use_stdin": true,
+    "controller_timeout_seconds": 18000.0,
+    "controller_recent_iterations": 2,
+    "controller_canary_enabled": false,
+    "controller_canary_task_count": 3,
+    "controller_canary_min_reward_delta": -0.02,
+    "controller_canary_max_blocker_increase": 0,
+    "best_harness_selection_modes": ["mean_reward", "perfect_success_count"],
+    "controller_env": {
+      "ANTHROPIC_AUTH_TOKEN": "",
+      "ANTHROPIC_BASE_URL": "",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "minimax/minimax-m2.7",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen/qwen3.6-plus",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "minimax/minimax-m2.7",
+      "ANTHROPIC_MODEL": "z-ai/glm-5.1",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+    },
+    "iterations": 8,
+    "primary_metric": "accuracy",
+    "judge_model": "gpt-4.1-mini",
+    "cases_path": "examples/demo_cases.json"
+  },
+  "terminal_bench": {
+    "enabled": true,
+    "install_mode": "pip",
+    "working_directory": ".benchmarks/terminal-bench",
+    "command": "tb",
+    "agent_name": "api-model",
+    "dataset_name": "terminal-bench-core",
+    "dataset_version": "0.1.1",
+    "n_concurrent": 1,
+    "output_dir": "artifacts/terminal-bench",
+    "extra_args": []
+  }
+}

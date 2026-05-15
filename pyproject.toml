@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memoharness"
+version = "0.1.0"
+description = "Experience-driven adaptive Harbor Codex harness optimizer."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = [
+    "llm",
+    "agent",
+    "harness",
+    "harbor",
+    "codex",
+    "terminal-bench",
+    "daytona",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Testing",
+]
+
+# Required at runtime by the only supported entry point
+# (`python -m memoharness.harbor.loop` / the `memoharness` script):
+#   - openai:   imported by harbor.agent, llm.client, controllers.llm_controller
+#   - requests: imported unconditionally at the top of harbor/loop.py
+dependencies = [
+    "openai>=1.0.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# Kept for backwards compatibility with `pip install -e ".[openai]"` from the README.
+openai = ["openai>=1.0.0"]
+
+# Full Harbor + Daytona runtime needed to actually execute training loops.
+harbor = [
+    "harbor",
+    "daytona",
+]
+
+# Test / development tooling.
+dev = [
+    "pytest>=7",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+memoharness = "memoharness.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
