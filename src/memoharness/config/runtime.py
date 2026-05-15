@@ -58,6 +58,7 @@ class HarnessSettings:
     tool_protocol: str = "native"
     agent_runtime: str = "harbor_codex"
     codex_bundle_path: str = "configs/harness_codex"
+    codex_bundle_init_mode: str = "w0"
     controller: str = "codex"
     controller_command: str = "codex"
     controller_args: list[str] = field(
@@ -79,7 +80,7 @@ class HarnessSettings:
     controller_canary_min_reward_delta: float = -0.02
     controller_canary_max_blocker_increase: int = 0
     best_harness_selection_modes: list[str] = field(default_factory=lambda: ["mean_reward"])
-    test_time_case_adaptation: bool = False
+    test_time_case_adaptation: bool = True
     iterations: int = 8
     primary_metric: str = "accuracy"
     judge_model: str = "gpt-4.1-mini"
@@ -95,6 +96,10 @@ class HarnessSettings:
         self.agent_runtime = str(self.agent_runtime or "harbor_codex").strip().lower()
         if self.agent_runtime != "harbor_codex":
             raise ValueError("harness.agent_runtime only supports 'harbor_codex'")
+
+        self.codex_bundle_init_mode = str(self.codex_bundle_init_mode or "w0").strip().lower()
+        if self.codex_bundle_init_mode not in {"w0", "workspace"}:
+            raise ValueError("harness.codex_bundle_init_mode must be one of: w0, workspace")
 
         self.controller = str(self.controller or "codex").strip().lower()
         if self.controller != "codex":

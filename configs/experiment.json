@@ -99,6 +99,7 @@
     "tool_protocol": "bash_tags",
     "agent_runtime": "harbor_codex",
     "codex_bundle_path": "configs/harness_codex",
+    "codex_bundle_init_mode": "w0",
     "controller": "codex",
     "controller_command": "codex",
     "controller_args": ["exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--color", "never", "-"],
@@ -110,6 +111,7 @@
     "controller_canary_min_reward_delta": -0.02,
     "controller_canary_max_blocker_increase": 0,
     "best_harness_selection_modes": ["mean_reward", "perfect_success_count"],
+    "test_time_case_adaptation": true,
     "controller_env": {
       "ANTHROPIC_AUTH_TOKEN": "",
       "ANTHROPIC_BASE_URL": "",

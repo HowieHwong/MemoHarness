@@ -2,41 +2,34 @@
   "bundle_version": 1,
   "config": {
     "D1": {
-      "structured_instruction": true,
-      "compression": "light",
-      "strategy": "Capture the exact livecodebench contract before editing: parsing, indexing, ordering, tie-breaks, blank-output legality, impossible outputs, numeric bounds, and exact stdout formatting."
+      "examples": false,
+      "structured_instruction": false,
+      "compression": "none"
     },
     "D2": {
-      "tool_access": "bash",
-      "retrieval_mode": "repo_local",
-      "top_k": 3,
+      "tool_access": "disabled",
       "tool_protocol": "native",
-      "strategy": "Within the first three tool calls inspect the current solution and one bounded contract or verifier clue; then keep reads path-scoped, cap windows at 200 lines, avoid raw log dumps, and prefer one focused proof over broad exploration."
+      "retrieval_mode": "none",
+      "top_k": 0
     },
     "D3": {
       "temperature": 0.0,
-      "max_tokens": 2048,
+      "max_tokens": 256,
       "top_p": 1.0,
-      "candidate_count": 1,
-      "codex_model": "gpt-5.4",
-      "reasoning_effort": "high",
-      "reasoning_summary": "none"
+      "candidate_count": 1
     },
     "D4": {
-      "workflow": "agentic_loop",
-      "stop_rule": "repo_checks_pass",
-      "strategy": "Use a contract -> invariant -> adversarial case -> edit -> proof loop; after one disproved hypothesis or two low-signal reads, pivot toward impossible or default branches, blank-output traps, parity bugs, boundary math, duplicates, and winner-selection logic before rewriting."
+      "workflow": "single_call",
+      "stop_rule": "immediate"
     },
     "D5": {
-      "memory_policy": "summary_buffer",
-      "history_keep": 4,
-      "strategy": "Keep only verifier-backed patterns: `calls=0` runs are unacceptable, TPM blowups come from oversized or repeated reads, and wrong outputs like `-1`, `0`, placeholder strings, or close numeric drift usually point to branch, boundary, or formatting bugs."
+      "memory_policy": "disabled",
+      "history_keep": 0
     },
     "D6": {
-      "postprocess": "final_message",
-      "validator": "repo_checks",
-      "fallback": "last_observation",
-      "strategy": "Before finishing, leave a real inspect/edit/check trace, run the smallest proof that exercises the repaired invariant, verify exact stdout formatting, and return a terse file-plus-proof summary."
+      "postprocess": "raw_passthrough",
+      "validator": "disabled",
+      "fallback": "none"
     }
   },
   "runtime_files": {
@@ -46,97 +39,8 @@
     "playbook": ".memoharness/playbook.md"
   },
   "codex": {
-    "model": "gpt-5.4",
-    "reasoning_effort": "high",
-    "reasoning_summary": "none"
-  },
-  "updated_iteration": 4,
-  "distilled_patterns": [
-    {
-      "pattern_id": "llm-pattern-iter4-2",
-      "primary_dim": "D2",
-      "description": "Early retrieval budget is too tight (top_k 3, first-three-call constraints), leading to under-specification and persistent contract mistakes (sentinel outputs, wrong branch defaults, formatting/line mismatches). The loop edits before collecting decisive checker/statement clues.",
-      "effect": "Multiple cases show stable wrong outputs despite iterations. In D2, raise top_k to 5 and require first calls include: solution file + official checker/validator or tests + one failing trace artifact; keep 200-line caps but mandate one targeted grep over output-format tokens.",
-      "evidence": [
-        "arc195_c",
-        "abc397_d",
-        "3308",
-        "abc343_a",
-        "arc188_c"
-      ],
-      "iteration_range": [
-        0,
-        4
-      ]
-    },
-    {
-      "pattern_id": "llm-pattern-iter4-3",
-      "primary_dim": "D3",
-      "description": "Token/model downgrade reduced reasoning headroom on hard hidden-test bugs; moving from gpt-5.3-codex/4096 to gpt-5.4/2048 coincides with no recovery and repeated D4 failures. Complex game/parity/default-branch cases likely need deeper search and longer chains.",
-      "effect": "Across 4+ cases, post-downgrade iterations remain at reward 0. In D3, restore max_tokens to 4096\u20136144 for terminal domains and enable candidate_count=2 only after first failed proof run; keep high reasoning_effort to improve hidden-branch diagnosis.",
-      "evidence": [
-        "arc192_b",
-        "arc188_c",
-        "arc195_c",
-        "abc397_d"
-      ],
-      "iteration_range": [
-        0,
-        4
-      ]
-    },
-    {
-      "pattern_id": "llm-pattern-iter4-1",
-      "primary_dim": "D4",
-      "description": "The dominant failure is execution-path collapse in the agentic loop: iterations 3\u20134 repeatedly die with shell-level `codex exec` exit 1 before meaningful inspect/edit/check work. This indicates D4 workflow/stop behavior is not resilient to runner faults and keeps re-entering a broken path, producing zero-reward plateaus across tasks.",
-      "effect": "Impacts 6/6 cases (all D4-primary, 0 reward in last 2 iters). Change D4 to fail-open: on first runner error, switch to direct bash+local edit mode, require at least one successful check command before stop, and add retry budget (e.g., 2) with alternate execution template.",
-      "evidence": [
-        "arc188_c",
-        "arc195_c",
-        "abc397_d",
-        "3308",
-        "arc192_b",
-        "abc343_a"
-      ],
-      "iteration_range": [
-        0,
-        4
-      ]
-    },
-    {
-      "pattern_id": "llm-pattern-iter4-2",
-      "primary_dim": "D4",
-      "description": "Before infrastructure failures, outputs show default/sentinel or extreme placeholder values (`11111`, `500000000`, `-1`, wrong winner/string), suggesting weak contract-to-invariant grounding and insufficient targeted counterexample checks. The current D4 pivot policy is broad but not forcing minimal falsification against the observed mismatch class.",
-      "effect": "At least 6 concrete wrong-answer signatures across cases. Tighten D4 with mandatory mismatch-driven microtests: reproduce failing line pattern, add 2 boundary tests + 1 formatting test before finalization; block completion unless new tests pass and differ from prior placeholder/default branch behavior.",
-      "evidence": [
-        "arc188_c",
-        "arc195_c",
-        "abc397_d",
-        "3308",
-        "arc192_b",
-        "abc343_a"
-      ],
-      "iteration_range": [
-        0,
-        4
-      ]
-    },
-    {
-      "pattern_id": "llm-pattern-iter4-3",
-      "primary_dim": "D2",
-      "description": "Context throttling likely became too aggressive after iteration 2 (`top_k` 4\u21923, history 6\u21924, tokens 4096\u21922048), while tasks need exact contract details. This can amplify wrong-branch fixes and force heuristic rewrites, especially when combined with noisy verifier snippets.",
-      "effect": "Correlates with no recovery after config shrink in 5+ cases. Raise D2 recall for failing cases: `top_k` back to 5 with one required problem-statement source + one verifier clue; pair with D3 max_tokens 3072 to preserve contract and proof context without large read dumps.",
-      "evidence": [
-        "arc188_c",
-        "arc195_c",
-        "abc397_d",
-        "arc192_b",
-        "abc343_a"
-      ],
-      "iteration_range": [
-        0,
-        4
-      ]
-    }
-  ]
+    "model": "",
+    "reasoning_effort": "medium",
+    "reasoning_summary": "auto"
+  }
 }

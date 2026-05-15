@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import Counter
 from textwrap import dedent
 
 from ..bank.experience import ExperienceBank
@@ -288,6 +289,7 @@ class LLMController:
             )
 
         case_summary = self._build_case_summary(bank, case)
+        test_evidence = self._build_test_time_evidence_summary(bank, case)
         prompt = (
             "You are adapting a MemoHarness configuration for one evaluation case.\n\n"
             "## Target Case\n"
@@ -296,9 +298,11 @@ class LLMController:
             f"features={json.dumps(vars(case.features), indent=2)}\n\n"
             "## Base Dimension Summary\n"
             f"{json.dumps(config.as_dict(), indent=2)}\n\n"
-            "## Similar Cases\n"
+            "## Test-Time Evidence\n"
+            f"{test_evidence}\n\n"
+            "## Similar Cases Summary\n"
             f"{case_summary}\n\n"
-            "Only adjust dimensions when the similar-case evidence justifies it.\n\n"
+            "Only adjust dimensions when the structured retrieved slice or similar-case evidence justifies it.\n\n"
             + _CONFIG_ONLY_DOC
         )
         config_updates = self._call_llm_for_config(prompt)
@@ -1003,6 +1007,152 @@ class HarnessImpl:
             parts.append("No similar-case summary available.")
 
         return "\n".join(parts)
+
+    def _render_retrieval_request(self, request: RetrievalRequest) -> str:
+        payload = {
+            "feature_filters": [
+                {
+                    "field": feature_filter.field,
+                    "operator": feature_filter.operator,
+                    "value": feature_filter.value,
+                }
+                for feature_filter in request.feature_filters
+            ],
+            "min_consecutive_failures": request.min_consecutive_failures,
+            "reward_trend": request.reward_trend,
+            "primary_dim": request.primary_dim,
+            "iteration_range": list(request.iteration_range) if request.iteration_range else None,
+            "case_ids": request.case_ids,
+            "sample_k": request.sample_k,
+            "sample_by_cluster_k": request.sample_by_cluster_k,
+            "max_entries": request.max_entries,
+            "max_global_patterns": request.max_global_patterns,
+        }
+        compact = {key: value for key, value in payload.items() if value not in (None, [], {})}
+        return json.dumps(compact, ensure_ascii=False, indent=2)
+
+    def _render_retrieved_slice(self, retrieved_slice) -> str:
+        parts: list[str] = []
+        if retrieved_slice.global_patterns:
+            parts.append("Global patterns:")
+            for pattern in retrieved_slice.global_patterns:
+                parts.append(
+                    "  [{pattern_id}] primary_dim={primary_dim} effect={effect}".format(
+                        pattern_id=pattern.pattern_id,
+                        primary_dim=pattern.primary_dim,
+                        effect=pattern.effect[:160],
+                    )
+                )
+
+        if retrieved_slice.entries:
+            parts.append("Retrieved per-case entries:")
+            for entry in retrieved_slice.entries[:6]:
+                stats = retrieved_slice.case_stats.get(entry.case_id)
+                parts.append(
+                    "  case={case_id} iter={iteration} reward={reward:.2f} domain={domain} "
+                    "primary_dim={primary_dim} consecutive_failures={consecutive_failures} "
+                    "trend={trend} analysis={analysis}".format(
+                        case_id=entry.case_id,
+                        iteration=entry.iteration,
+                        reward=entry.primary_reward,
+                        domain=entry.case_features.domain,
+                        primary_dim=entry.diagnosis.diagnostic_signal.primary_dim,
+                        consecutive_failures=(
+                            stats.consecutive_failures if stats is not None else "n/a"
+                        ),
+                        trend=stats.reward_trend if stats is not None else "n/a",
+                        analysis=entry.diagnosis.analysis[:140],
+                    )
+                )
+        else:
+            parts.append("Retrieved per-case entries: none")
+
+        return "\n".join(parts)
+
+    def _build_test_time_evidence_summary(self, bank: ExperienceBank, case: BenchmarkCase) -> str:
+        try:
+            request, retrieved_slice = bank.retrieve_feature_matched_slice_for_case(case)
+        except Exception as exc:
+            request = RetrievalRequest(max_entries=8, max_global_patterns=3)
+            retrieved_slice = bank.retrieve(request)
+            logger.warning(
+                "Falling back to unconditioned test-time retrieval for case %s: %s",
+                case.case_id,
+                exc,
+            )
+
+        parts = [
+            "Structured query:",
+            self._render_retrieval_request(request),
+            "",
+            "Retrieved slice:",
+            self._render_retrieved_slice(retrieved_slice),
+        ]
+
+        case_summary = self._build_case_summary(bank, case)
+        if case_summary:
+            parts.extend(["", "Nearest successful/failed neighborhoods:", case_summary])
+        return "\n".join(parts)
+
+    def _build_iteration_retrieval_evidence(
+        self,
+        bank: ExperienceBank,
+        iteration: int,
+        *,
+        min_consecutive_failures: int = 3,
+    ) -> str:
+        window_start = max(0, iteration - 4)
+        recent_failures = [
+            entry
+            for entry in bank.entries
+            if window_start <= entry.iteration <= iteration and not entry.diagnosis.success
+        ]
+        primary_dim = None
+        case_ids = None
+        reward_trend = None
+        min_failure_threshold = None
+
+        if recent_failures:
+            primary_dim = Counter(
+                entry.diagnosis.diagnostic_signal.primary_dim for entry in recent_failures
+            ).most_common(1)[0][0]
+            case_ids = list(dict.fromkeys(entry.case_id for entry in recent_failures[-6:]))
+            recent_stats = [
+                bank.case_stats[entry.case_id]
+                for entry in recent_failures
+                if entry.case_id in bank.case_stats
+            ]
+            if any(
+                stats.consecutive_failures >= min_consecutive_failures
+                for stats in recent_stats
+            ):
+                min_failure_threshold = min_consecutive_failures
+            if any(
+                stats.reward_trend == "degrading"
+                for stats in recent_stats
+            ):
+                reward_trend = "degrading"
+
+        request = RetrievalRequest(
+            primary_dim=primary_dim,
+            min_consecutive_failures=min_failure_threshold,
+            reward_trend=reward_trend,
+            iteration_range=(window_start, iteration),
+            case_ids=case_ids,
+            sample_by_cluster_k=1,
+            max_entries=8,
+            max_global_patterns=3,
+        )
+        retrieved_slice = bank.retrieve(request)
+        return "\n".join(
+            [
+                "Structured query:",
+                self._render_retrieval_request(request),
+                "",
+                "Retrieved slice:",
+                self._render_retrieved_slice(retrieved_slice),
+            ]
+        )
 
     def _build_bank_summary(
         self,

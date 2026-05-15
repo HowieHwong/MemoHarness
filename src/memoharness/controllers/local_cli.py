@@ -174,6 +174,7 @@ class ClaudeCodeController:
         base_config: HarnessConfig,
     ) -> ControllerDecision:
         config = self.stabilize_config(base_config)
+        test_evidence = self._helper._build_test_time_evidence_summary(bank, case)
         prompt = dedent(
             f"""
             You are adapting a MemoHarness configuration for one evaluation case.
@@ -193,10 +194,13 @@ class ClaudeCodeController:
             ## Base Dimension Summary
             {json.dumps(config.as_dict(), indent=2)}
 
+            ## Test-Time Evidence
+            {test_evidence}
+
             ## Similar Cases Summary
             {self._helper._build_case_summary(bank, case)}
 
-            Only adjust dimensions when the similar-case evidence clearly justifies it.
+            Only adjust dimensions when the structured retrieved slice or similar-case evidence clearly justifies it.
 
             {_CONFIG_ONLY_DOC.strip()}
             """
@@ -639,6 +643,11 @@ class ClaudeCodeController:
         min_consecutive_failures: int,
     ) -> str:
         bank_summary = self._build_iteration_bank_summary(bank, iteration)
+        retrieval_evidence = self._helper._build_iteration_retrieval_evidence(
+            bank,
+            iteration,
+            min_consecutive_failures=min_consecutive_failures,
+        )
         recent_failures = self._build_recent_failure_excerpt(bank, iteration)
         signal_summary = self._build_iteration_signal_summary(bank, iteration)
         return dedent(
@@ -671,6 +680,9 @@ class ClaudeCodeController:
 
             ## Current Iteration Experience Summary
             {bank_summary}
+
+            ## Structured Retrieval Evidence
+            {retrieval_evidence}
 
             ## Recent Failure Excerpts
             {recent_failures}
@@ -739,6 +751,11 @@ class ClaudeCodeController:
             iteration,
             min_consecutive_failures=min_consecutive_failures,
         )
+        retrieval_evidence = self._helper._build_iteration_retrieval_evidence(
+            bank,
+            iteration,
+            min_consecutive_failures=min_consecutive_failures,
+        )
         recent_failures = self._build_recent_failure_excerpt(bank, iteration)
         signal_summary = self._build_iteration_signal_summary(bank, iteration)
         current_code_preview = self._truncate_for_prompt(current_code, limit=_PROMPT_CODE_PREVIEW_LIMIT)
@@ -763,6 +780,9 @@ class ClaudeCodeController:
 
             ## Experience Bank Summary
             {bank_summary}
+
+            ## Structured Retrieval Evidence
+            {retrieval_evidence}
 
             ## Recent Failure Excerpts
             {recent_failures}

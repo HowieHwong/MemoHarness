@@ -96,10 +96,32 @@ def _policy_payload(
     return payload
 
 
+def _is_minimal_w0_config(config: HarnessConfig) -> bool:
+    return (
+        config.D1.get("examples") is False
+        and config.D1.get("structured_instruction") is False
+        and str(config.D1.get("compression") or "none") == "none"
+        and str(config.D2.get("tool_access") or "disabled") == "disabled"
+        and str(config.D2.get("retrieval_mode") or "none") == "none"
+        and int(config.D2.get("top_k") or 0) == 0
+        and str(config.D4.get("workflow") or "single_call") == "single_call"
+        and str(config.D5.get("memory_policy") or "disabled") == "disabled"
+        and str(config.D6.get("validator") or "disabled") == "disabled"
+    )
+
+
 def _default_agents_content(config: HarnessConfig) -> str:
     workflow = str(config.D4.get("workflow") or "agentic_loop")
     validator = str(config.D6.get("validator") or "repo_checks")
     memory_policy = str(config.D5.get("memory_policy") or "summary_buffer")
+    if _is_minimal_w0_config(config):
+        return (
+            "# AdaHarness Codex Overlay\n\n"
+            "You are the coding agent running inside Harbor's Codex integration.\n"
+            "Read `./policy.json` for the authoritative D1-D6 summary.\n"
+            "This bundle is the paper's minimal W0 initialization: no demonstrations, no retrieval "
+            "overlay, no cross-call memory, and no validation scaffold beyond the base agent.\n"
+        )
     return (
         "# AdaHarness Codex Overlay\n\n"
         "You are the coding agent running inside Harbor's Codex integration.\n"
@@ -127,6 +149,13 @@ def _default_memory_content() -> str:
 
 
 def _default_playbook_content(config: HarnessConfig) -> str:
+    if _is_minimal_w0_config(config):
+        return (
+            "# Repo Playbook\n\n"
+            "Use `./policy.json` as the authoritative D1-D6 summary.\n"
+            "W0 starts without a persistent playbook. Leave this file minimal until search distills "
+            "stable evidence-backed heuristics.\n"
+        )
     return (
         "# Repo Playbook\n\n"
         "Use `./policy.json` as the authoritative D1-D6 summary.\n"

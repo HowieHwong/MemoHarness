@@ -59,21 +59,6 @@ class ExperienceBank:
             openai_client: OpenAI client for semantic embeddings.
             embedding_model: Model name for OpenAI embeddings.
         """
-        self._custom_embed_fn = embed_fn
-        self._custom_similarity_fn = similarity_fn
-        self._openai_embedder = None
-
-        # Auto-enable semantic embedding when a client is provided
-        if openai_client is not None:
-            use_semantic_embedding = True
-
-        if use_semantic_embedding and openai_client is not None:
-            from ..llm.embedder import OpenAIEmbedder
-            self._openai_embedder = OpenAIEmbedder(
-                client=openai_client,
-                model=embedding_model,
-            )
-
         self.entries: list[PerCaseEntry] = []
         self.case_stats: dict[str, CaseStats] = {}
         self.global_patterns: list[GlobalPattern] = []
@@ -85,6 +70,38 @@ class ExperienceBank:
         # iteration boundaries.
         self.last_distill_entry_count: int = 0
         self.min_consecutive_failures: int = min_consecutive_failures
+        self.configure_similarity_backend(
+            embed_fn=embed_fn,
+            similarity_fn=similarity_fn,
+            use_semantic_embedding=use_semantic_embedding,
+            openai_client=openai_client,
+            embedding_model=embedding_model,
+        )
+
+    def configure_similarity_backend(
+        self,
+        *,
+        embed_fn: Optional[EmbedFn] = None,
+        similarity_fn: Optional[SimilarityFn] = None,
+        use_semantic_embedding: bool = False,
+        openai_client=None,
+        embedding_model: str = "text-embedding-3-small",
+    ) -> None:
+        """Attach or refresh the semantic retrieval backend for this bank."""
+        self._custom_embed_fn = embed_fn
+        self._custom_similarity_fn = similarity_fn
+        self._openai_embedder = None
+
+        if openai_client is not None:
+            use_semantic_embedding = True
+
+        if use_semantic_embedding and openai_client is not None:
+            from ..llm.embedder import OpenAIEmbedder
+
+            self._openai_embedder = OpenAIEmbedder(
+                client=openai_client,
+                model=embedding_model,
+            )
 
     def add_entry(self, entry: PerCaseEntry) -> bool:
         """Add *entry* to the bank and return True if distillation should run.
@@ -190,6 +207,124 @@ class ExperienceBank:
         successful = [entry for entry in ranked if entry.diagnosis.success][:top_k_success]
         failed = [entry for entry in ranked if not entry.diagnosis.success][:top_k_failure]
         return SimilarCaseResults(successful=successful, failed=failed)
+
+    def retrieve_feature_matched_slice_for_case(
+        self,
+        case: BenchmarkCase,
+        *,
+        max_entries: int = 8,
+        max_global_patterns: int = 3,
+        sample_by_cluster_k: int | None = 1,
+    ) -> tuple[RetrievalRequest, RetrievedSlice]:
+        """Retrieve a bounded, progressively relaxed slice for a target case."""
+        features = case.features
+        complexity_delta = 0.25
+        ambiguity_delta = 0.25
+        input_delta = max(32, int(features.input_length * 0.5))
+
+        def _request(filters: list[FeatureFilter]) -> RetrievalRequest:
+            return RetrievalRequest(
+                feature_filters=filters,
+                include_global_patterns=True,
+                max_entries=max_entries,
+                max_global_patterns=max_global_patterns,
+                sample_by_cluster_k=sample_by_cluster_k,
+            )
+
+        strict_filters = [
+            FeatureFilter(field="domain", operator="eq", value=features.domain),
+            FeatureFilter(
+                field="requires_external_knowledge",
+                operator="eq",
+                value=features.requires_external_knowledge,
+            ),
+            FeatureFilter(
+                field="complexity_estimate",
+                operator="gte",
+                value=max(0.0, features.complexity_estimate - complexity_delta),
+            ),
+            FeatureFilter(
+                field="complexity_estimate",
+                operator="lte",
+                value=min(1.0, features.complexity_estimate + complexity_delta),
+            ),
+            FeatureFilter(
+                field="ambiguity_score",
+                operator="gte",
+                value=max(0.0, features.ambiguity_score - ambiguity_delta),
+            ),
+            FeatureFilter(
+                field="ambiguity_score",
+                operator="lte",
+                value=min(1.0, features.ambiguity_score + ambiguity_delta),
+            ),
+            FeatureFilter(
+                field="input_length",
+                operator="gte",
+                value=max(0, features.input_length - input_delta),
+            ),
+            FeatureFilter(
+                field="input_length",
+                operator="lte",
+                value=features.input_length + input_delta,
+            ),
+        ]
+        if features.cluster_id:
+            strict_filters.append(
+                FeatureFilter(field="cluster_id", operator="eq", value=features.cluster_id)
+            )
+
+        candidate_requests = [
+            _request(strict_filters),
+            _request(
+                [
+                    feature_filter
+                    for feature_filter in strict_filters
+                    if feature_filter.field != "cluster_id"
+                ]
+            ),
+            _request(
+                [
+                    FeatureFilter(field="domain", operator="eq", value=features.domain),
+                    FeatureFilter(
+                        field="requires_external_knowledge",
+                        operator="eq",
+                        value=features.requires_external_knowledge,
+                    ),
+                    FeatureFilter(
+                        field="complexity_estimate",
+                        operator="gte",
+                        value=max(0.0, features.complexity_estimate - complexity_delta),
+                    ),
+                    FeatureFilter(
+                        field="complexity_estimate",
+                        operator="lte",
+                        value=min(1.0, features.complexity_estimate + complexity_delta),
+                    ),
+                ]
+            ),
+            _request(
+                [
+                    FeatureFilter(field="domain", operator="eq", value=features.domain),
+                    FeatureFilter(
+                        field="requires_external_knowledge",
+                        operator="eq",
+                        value=features.requires_external_knowledge,
+                    ),
+                ]
+            ),
+            _request([FeatureFilter(field="domain", operator="eq", value=features.domain)]),
+        ]
+
+        last_request = candidate_requests[-1]
+        last_slice = self.retrieve(last_request)
+        for request in candidate_requests:
+            retrieved_slice = self.retrieve(request)
+            last_request = request
+            last_slice = retrieved_slice
+            if retrieved_slice.entries:
+                return request, retrieved_slice
+        return last_request, last_slice
 
     def distill_global_patterns(
         self,

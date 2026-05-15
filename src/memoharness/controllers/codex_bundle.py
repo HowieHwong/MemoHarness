@@ -33,6 +33,10 @@ class CodexBundleController(CodexController):
         ensure_codex_bundle(self.bundle_root, make_minimal_config())
         super().__init__(harness_path=self.bundle_paths.agents_path, **kwargs)
 
+    def stabilize_config(self, config: HarnessConfig | None = None) -> HarnessConfig:
+        """Preserve the paper's W0-to-W* search space for Codex bundle experiments."""
+        return config.clone() if config is not None else make_minimal_config()
+
     def generate_initial_harness(self, dataset: str = "") -> tuple[str, HarnessConfig]:
         fallback = self.stabilize_config(make_minimal_config())
         ensure_codex_bundle(self.bundle_root, fallback)
@@ -210,6 +214,11 @@ class CodexBundleController(CodexController):
         min_consecutive_failures: int,
     ) -> str:
         bank_summary = self._build_iteration_bank_summary(bank, iteration)
+        retrieval_evidence = self._helper._build_iteration_retrieval_evidence(
+            bank,
+            iteration,
+            min_consecutive_failures=min_consecutive_failures,
+        )
         recent_failures = self._build_recent_failure_excerpt(bank, iteration)
         signal_summary = self._build_iteration_signal_summary(bank, iteration)
         return dedent(
@@ -241,6 +250,9 @@ class CodexBundleController(CodexController):
 
             ## Current Iteration Experience Summary
             {bank_summary}
+
+            ## Structured Retrieval Evidence
+            {retrieval_evidence}
 
             ## Recent Failure Excerpts
             {recent_failures}

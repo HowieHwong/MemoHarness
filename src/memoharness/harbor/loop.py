@@ -1897,7 +1897,7 @@ class HarborTrainingLoop:
         self.controller_canary_min_reward_delta = -0.02
         self.controller_canary_max_blocker_increase = 0
         self.best_harness_selection_modes = [_BEST_HARNESS_MODE_MEAN_REWARD]
-        self.test_time_case_adaptation = False
+        self.test_time_case_adaptation = True
 
         # jobs_dir defaults to jobs/<sanitized-dataset-name>/ so that runs for
         # different datasets are kept in separate sub-trees and never clash.
@@ -1929,6 +1929,8 @@ class HarborTrainingLoop:
         self._resolved_bank_path: Path = None
         self._harness_runtime_mode = "memoharness"
         self._codex_bundle_root: Path | None = None
+        self._configured_codex_bundle_root: Path | None = None
+        self._codex_bundle_init_mode = "w0"
 
     def _resolve_harness_paths(self) -> tuple[Path, Path]:
         """Return normalized live-harness (.py) and summary (.json) paths."""
@@ -3002,13 +3004,15 @@ class HarborTrainingLoop:
                 "configs/experiment.json chain only supports harness.agent_runtime='harbor_codex'."
             )
         if self._is_harbor_codex_mode():
+            self._codex_bundle_init_mode = str(
+                getattr(runtime.harness, "codex_bundle_init_mode", "w0") or "w0"
+            ).strip().lower()
             configured_bundle = str(
                 getattr(runtime.harness, "codex_bundle_path", self.harness_config_path)
                 or self.harness_config_path
             ).strip()
             if configured_bundle:
-                self._codex_bundle_root = Path(configured_bundle).expanduser().resolve()
-                self.harness_config_path = str(self._codex_bundle_root)
+                self._configured_codex_bundle_root = Path(configured_bundle).expanduser().resolve()
             if self.agent_import_path == _DEFAULT_MEMOHARNESS_AGENT_IMPORT:
                 self.agent_import_path = _DEFAULT_MEMOHARNESS_CODEX_AGENT_IMPORT
         self.console_mode = str(
@@ -3071,6 +3075,12 @@ class HarborTrainingLoop:
         # Ensure parent dirs exist before we try to load the bank
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self._resolved_bank_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._is_harbor_codex_mode():
+            if self._codex_bundle_init_mode == "workspace" and self._configured_codex_bundle_root is not None:
+                self._codex_bundle_root = self._configured_codex_bundle_root
+            else:
+                self._codex_bundle_root = self._resolved_bank_path.parent / "live.bundle"
+            self.harness_config_path = str(self._codex_bundle_root)
         self._configure_run_console_capture()
         logger.info("Run ID: %s", self._run_id)
         logger.info("Run console log: %s", self._run_console_log_path)
@@ -3087,10 +3097,14 @@ class HarborTrainingLoop:
             self._bank = ExperienceBank.load(self._resolved_bank_path)
             # Update threshold in case it changed since the bank was saved
             self._bank.min_consecutive_failures = self.min_consecutive_failures
+            self._bank.configure_similarity_backend(openai_client=self._openai_client)
             logger.info("Resumed ExperienceBank from %s (%d entries).",
                         self._resolved_bank_path, len(self._bank.entries))
         else:
-            self._bank = ExperienceBank(min_consecutive_failures=self.min_consecutive_failures)
+            self._bank = ExperienceBank(
+                min_consecutive_failures=self.min_consecutive_failures,
+                openai_client=self._openai_client,
+            )
             logger.info("Starting fresh ExperienceBank.")
 
         # --- Controller ----------------------------------------------------
@@ -3153,25 +3167,16 @@ class HarborTrainingLoop:
                 )
                 logger.info("Loaded Harbor Codex bundle from %s.", bundle_root)
             else:
-                try:
-                    code, config = self._controller.generate_initial_harness(dataset=self.dataset)
-                    self._current_harness_code = code
-                    self._current_config = config
-                    logger.info(
-                        "No Codex bundle found - controller generated initial bundle for '%s' -> %s.",
-                        self.dataset,
-                        bundle_root,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Controller could not generate Codex bundle (%s) - creating minimal bundle.",
-                        exc,
-                    )
-                    ensure_codex_bundle(bundle_root, make_minimal_config())
-                    self._current_harness_code, self._current_config = load_codex_bundle(
-                        bundle_root,
-                        fallback=make_minimal_config(),
-                    )
+                ensure_codex_bundle(bundle_root, make_minimal_config())
+                self._current_harness_code, self._current_config = load_codex_bundle(
+                    bundle_root,
+                    fallback=make_minimal_config(),
+                )
+                logger.info(
+                    "Initialized Harbor Codex bundle from minimal W0 for '%s' -> %s.",
+                    self.dataset,
+                    bundle_root,
+                )
         elif harness_py.exists():
             self._current_harness_code = harness_py.read_text()
             code_config = self._extract_config_from_code(self._current_harness_code)
