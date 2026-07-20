@@ -2,7 +2,7 @@
 <h3 align="center">Agent Harnesses That Learn from Experience</h3>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/arXiv-2607.14159-B31B1B.svg?logo=arxiv&logoColor=white" alt="arXiv">
+  <a href="https://arxiv.org/abs/2607.14159"><img src="https://img.shields.io/badge/arXiv-2607.14159-B31B1B.svg?logo=arxiv&logoColor=white" alt="arXiv"></a> 
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Runtime-Harbor%20%2B%20Daytona-0A7E8C.svg" alt="Runtime">
   <!-- <img src="https://img.shields.io/badge/Controller-Codex%20CLI-111827.svg" alt="Controller"> -->
