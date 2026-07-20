@@ -2,13 +2,15 @@
 <h3 align="center">Agent Harnesses That Learn from Experience</h3>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/arXiv-2607.14159-B31B1B.svg?logo=arxiv&logoColor=white" alt="arXiv">
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Runtime-Harbor%20%2B%20Daytona-0A7E8C.svg" alt="Runtime">
-  <img src="https://img.shields.io/badge/Controller-Codex%20CLI-111827.svg" alt="Controller">
-  <br/>
+  <!-- <img src="https://img.shields.io/badge/Controller-Codex%20CLI-111827.svg" alt="Controller"> -->
+  <!-- <br/>
   <img src="https://img.shields.io/badge/Method-Training%20Search%20%2B%20Test--Time%20Adaptation-9333EA.svg" alt="Method">
   <img src="https://img.shields.io/badge/Selection-Correctness--First-F59E0B.svg" alt="Selection">
-  <img src="https://img.shields.io/badge/Benchmarks-Terminal--Bench%20%7C%20LiveCodeBench%20%7C%20FinanceAgent-2563EB.svg" alt="Benchmarks">
+  <img src="https://img.shields.io/badge/Benchmarks-Terminal--Bench%20%7C%20LiveCodeBench%20%7C%20FinanceAgent-2563EB.svg" alt="Benchmarks"> -->
+
 </p>
 
 <p align="center">
