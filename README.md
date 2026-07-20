@@ -147,3 +147,18 @@ MemoHarness/
 │     └─ core/               # shared abstractions and data models
 └─ ...
 ```
+
+## Citation
+
+If you find our work helpful, please consider citing it:
+
+```bibtex
+@misc{huang2026memoharness,
+      title={MemoHarness: Agent Harnesses That Learn from Experience}, 
+      author={Yue Huang and Wenjie Wang and Han Bao and Yuchen Ma and Xiaonan Luo and Yi Nian and Haomin Zhuang and Zheyuan Liu and Yue Zhao and Xiangliang Zhang},
+      year={2026},
+      eprint={2607.14159},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={[https://arxiv.org/abs/2607.14159](https://arxiv.org/abs/2607.14159)}, 
+}
