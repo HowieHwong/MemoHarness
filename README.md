@@ -26,7 +26,9 @@
 
 ## News
 
-- **2026-07-28** — Maintenance update: fixed tool-use telemetry, trial result labelling, and timeout handling in the search loop, and added anti-overfitting constraints on the harness controller.
+- **2026-07-28** - Fixed tool-use telemetry, trial result labelling, and timeout handling in the search loop.
+
+- **2026-07-14** - Paper released on [arxiv](https://arxiv.org/abs/2607.14159)
 
 ---
 
