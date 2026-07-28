@@ -26,10 +26,13 @@ from .llm_controller import (
 
 logger = logging.getLogger(__name__)
 
-_PROMPT_FAILURE_ENTRY_LIMIT = 4
-_PROMPT_SIGNAL_ENTRY_LIMIT = 5
-_PROMPT_FAILURE_ANALYSIS_LIMIT = 180
-_PROMPT_SIGNAL_ANALYSIS_LIMIT = 140
+# The full set of per-iteration failure analyses is ~5k characters (~1.2k tokens)
+# for a 33-task split, so there is no reason to clip it to 4 cases of 180 chars --
+# that threw away almost all of the controller's evidence.
+_PROMPT_FAILURE_ENTRY_LIMIT = 40
+_PROMPT_SIGNAL_ENTRY_LIMIT = 40
+_PROMPT_FAILURE_ANALYSIS_LIMIT = 2000
+_PROMPT_SIGNAL_ANALYSIS_LIMIT = 2000
 _PROMPT_CODE_PREVIEW_LIMIT = 12000
 _PROMPT_RETRY_ERROR_LIMIT = 1200
 _CONTROLLER_FAILURE_TAIL_BYTES = 131072
@@ -853,6 +856,89 @@ class ClaudeCodeController:
 
         return "\n".join(parts)
 
+    def _build_task_history_matrix(
+        self,
+        bank: ExperienceBank,
+        iteration: int,
+        max_columns: int = 15,
+    ) -> str:
+        """Per-task solved/failed across every iteration recorded so far.
+
+        Without this the controller only ever sees the current iteration and
+        cannot tell "I just broke this task" from "this task has never passed".
+        The summary line at the bottom is the important part: it says which
+        tasks can actually respond to a harness change.
+        """
+        by_task: dict[str, dict[int, float]] = {}
+        blocked: dict[tuple[str, int], bool] = {}
+        for entry in bank.entries:
+            by_task.setdefault(entry.case_id, {})[entry.iteration] = entry.primary_reward
+            analysis = str(entry.diagnosis.analysis or "")
+            blocked[(entry.case_id, entry.iteration)] = analysis.startswith("External blocker")
+        if not by_task:
+            return "No per-task history recorded yet."
+
+        iterations = sorted({it for row in by_task.values() for it in row})
+        if len(iterations) > max_columns:
+            iterations = iterations[-max_columns:]
+
+        header = "".join("%3d" % it for it in iterations)
+        lines = ["%-38s%s   solved" % ("task", header)]
+        always, never, flipping = [], [], []
+        for task in sorted(by_task):
+            row = by_task[task]
+            cells = ""
+            observed = 0
+            solved = 0
+            for it in iterations:
+                value = row.get(it)
+                if value is None:
+                    cells += "  ."
+                    continue
+                if blocked.get((task, it)):
+                    # Sandbox/credit/startup failure: the harness never got a
+                    # fair shot, so it must not be read as a capability signal.
+                    cells += "  x"
+                    continue
+                observed += 1
+                if value >= 1:
+                    solved += 1
+                    cells += "  1"
+                else:
+                    cells += "  0"
+            lines.append("%-38s%s   %d/%d" % (task, cells, solved, observed))
+            if observed == 0:
+                continue
+            if solved == observed:
+                always.append(task)
+            elif solved == 0:
+                never.append(task)
+            else:
+                flipping.append(task)
+
+        lines.append("")
+        lines.append(
+            "Legend: 1=solved 0=failed x=external blocker (sandbox/credits/startup, "
+            "not a harness signal) .=no result recorded."
+        )
+        lines.append(
+            "%d task(s) always solved (insensitive to harness changes), "
+            "%d never solved (likely capability or environment limits), "
+            "%d flipping." % (len(always), len(never), len(flipping))
+        )
+        if flipping:
+            lines.append(
+                "Only the flipping tasks can respond to a harness edit, so weigh them "
+                "highest: " + ", ".join(sorted(flipping))
+            )
+        if never:
+            lines.append(
+                "Never solved in any iteration - do not spend the bundle's budget on "
+                "these unless the evidence shows a fixable harness cause: "
+                + ", ".join(sorted(never))
+            )
+        return "\n".join(lines)
+
     def _build_recent_failure_excerpt(
         self,
         bank: ExperienceBank,
@@ -908,12 +994,21 @@ class ClaudeCodeController:
                 entry.diagnosis.analysis,
                 limit=_PROMPT_SIGNAL_ANALYSIS_LIMIT,
             )
+            behaviour = next(
+                (
+                    str(item)
+                    for item in (trajectory.intermediate_outputs or [])
+                    if str(item).startswith("behaviour:")
+                ),
+                "",
+            )
             lines.append(
                 f"case={entry.case_id} reward={entry.primary_reward:.2f} "
                 f"primary_dim={entry.diagnosis.diagnostic_signal.primary_dim} "
                 f"changes={change_text} calls={trajectory.num_llm_calls} "
                 f"tokens={trajectory.total_tokens} tools={len(trajectory.tools_invoked)} "
-                f"analysis={analysis}"
+                + (f"{behaviour} " if behaviour else "")
+                + f"analysis={analysis}"
             )
         return "\n".join(lines)
 

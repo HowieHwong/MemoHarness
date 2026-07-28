@@ -9,6 +9,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from memoharness.harbor.runtime_patch import apply_runtime_patch
 from memoharness.runtime.codex_bundle import sync_codex_bundle_to_environment
 
 if TYPE_CHECKING:
@@ -16,6 +17,15 @@ if TYPE_CHECKING:
     from harbor.models.agent.context import AgentContext
 
 logger = logging.getLogger(__name__)
+
+# Harbor loads this module through ``--agent-import-path`` inside the harbor
+# subprocess, which is the earliest point where we can install the runtime
+# patch. Without this call the patch module is dead code: the configured
+# agent/verifier timeout overrides and the deadline notice never apply.
+try:
+    apply_runtime_patch()
+except Exception:  # pragma: no cover - never let a patch failure kill a run
+    logger.exception("Failed to apply the Harbor runtime patch; continuing unpatched.")
 
 _BUNDLE_ENV = "MEMOHARNESS_CODEX_BUNDLE_PATH"
 _PROMPT_TEMPLATE_ENV = "MEMOHARNESS_CODEX_PROMPT_TEMPLATE"
@@ -25,6 +35,8 @@ _CODEX_EXPORT_ROOT_ENV = "MEMOHARNESS_HARBOR_CODEX_EXPORT_ROOT"
 _CODEX_BASE_URL_ENV = "MEMOHARNESS_CODEX_BASE_URL"
 _CODEX_PROVIDER_NAME_ENV = "MEMOHARNESS_CODEX_PROVIDER_NAME"
 _CODEX_WIRE_API_ENV = "MEMOHARNESS_CODEX_WIRE_API"
+_CODEX_REQUIRES_OPENAI_AUTH_ENV = "MEMOHARNESS_CODEX_REQUIRES_OPENAI_AUTH"
+_CODEX_SUPPORTS_WEBSOCKETS_ENV = "MEMOHARNESS_CODEX_SUPPORTS_WEBSOCKETS"
 _CODEX_AUTH_JSON_PATH_ENV = "CODEX_AUTH_JSON_PATH"
 _DEFAULT_CODEX_HOME = "/logs/agent"
 _DEFAULT_CODEX_EXPORT_ROOT = "/logs/agent"
@@ -114,6 +126,8 @@ def _render_codex_config(
     provider_name: str,
     api_key_env: str,
     wire_api: str,
+    requires_openai_auth: bool = True,
+    supports_websockets: bool | None = None,
 ) -> str:
     def _escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace('"', '\\"')
@@ -123,16 +137,36 @@ def _render_codex_config(
     # the env), and disable_response_storage so Codex does not rely on server-
     # side Responses-API state that non-OpenAI providers (OpenRouter, GLM, ...)
     # don't implement.
-    return (
+    provider_options = (
         f'model_provider = "{_escape(provider_name)}"\n'
         "disable_response_storage = true\n"
         "\n"
         f"[model_providers.{provider_name}]\n"
         'name = "MemoHarness Custom Provider"\n'
         f'wire_api = "{_escape(wire_api)}"\n'
-        "requires_openai_auth = true\n"
+        f"requires_openai_auth = {'true' if requires_openai_auth else 'false'}\n"
+    )
+    if supports_websockets is not None:
+        provider_options += (
+            f"supports_websockets = {'true' if supports_websockets else 'false'}\n"
+        )
+    return provider_options + (
         f'base_url = "{_escape(base_url)}"\n'
         f'env_key = "{_escape(api_key_env)}"\n'
+    )
+
+
+def _read_optional_bool_env(name: str, *, default: bool | None) -> bool | None:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(
+        f"{name}='{raw}' is not a valid boolean "
+        "(use true/false, 1/0, yes/no, or on/off)."
     )
 
 
@@ -311,6 +345,19 @@ PY"""
             )
         return raw or _DEFAULT_CODEX_WIRE_API
 
+    def _configured_requires_openai_auth(self) -> bool:
+        value = _read_optional_bool_env(
+            _CODEX_REQUIRES_OPENAI_AUTH_ENV,
+            default=True,
+        )
+        return bool(value)
+
+    def _configured_supports_websockets(self) -> bool | None:
+        return _read_optional_bool_env(
+            _CODEX_SUPPORTS_WEBSOCKETS_ENV,
+            default=None,
+        )
+
     async def _write_codex_config(
         self,
         environment: "BaseEnvironment",
@@ -318,6 +365,8 @@ PY"""
         base_url: str,
         provider_name: str,
         wire_api: str,
+        requires_openai_auth: bool,
+        supports_websockets: bool | None,
     ) -> None:
         codex_home = self._sandbox_codex_home()
         api_key_env = "OPENAI_API_KEY"
@@ -326,6 +375,8 @@ PY"""
             provider_name=provider_name,
             api_key_env=api_key_env,
             wire_api=wire_api,
+            requires_openai_auth=requires_openai_auth,
+            supports_websockets=supports_websockets,
         )
         quoted_home = shlex.quote(codex_home)
         quoted_path = shlex.quote(f"{codex_home}/config.toml")
@@ -341,11 +392,15 @@ PY"""
             description="write Codex config.toml",
         )
         logger.info(
-            "Wrote Codex config.toml to %s/config.toml (provider=%s, base_url=%s, wire_api=%s)",
+            "Wrote Codex config.toml to %s/config.toml "
+            "(provider=%s, base_url=%s, wire_api=%s, requires_openai_auth=%s, "
+            "supports_websockets=%s)",
             codex_home,
             provider_name,
             base_url,
             wire_api,
+            requires_openai_auth,
+            supports_websockets,
         )
 
     async def _prepare_codex_provider(self, environment: "BaseEnvironment") -> None:
@@ -354,6 +409,8 @@ PY"""
             return
         provider_name = self._configured_provider_name()
         wire_api = self._configured_wire_api()
+        requires_openai_auth = self._configured_requires_openai_auth()
+        supports_websockets = self._configured_supports_websockets()
         os.environ.pop(_CODEX_AUTH_JSON_PATH_ENV, None)
         os.environ[_CODEX_HOME_ENV] = self._sandbox_codex_home()
         await self._write_codex_config(
@@ -361,6 +418,8 @@ PY"""
             base_url=base_url,
             provider_name=provider_name,
             wire_api=wire_api,
+            requires_openai_auth=requires_openai_auth,
+            supports_websockets=supports_websockets,
         )
 
     async def setup(self, environment: "BaseEnvironment") -> None:

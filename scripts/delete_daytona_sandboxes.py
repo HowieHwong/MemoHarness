@@ -24,9 +24,29 @@ def _mask_key(key: str) -> str:
     return f"{key[:8]}...{key[-4:]}"
 
 
-def _resolve_daytona_keys(config_path: Path) -> list[str]:
+def _read_key_file(path: Path) -> list[str]:
+    """Read one-key-per-line text file, ignoring blanks and # comments."""
+    keys: list[str] = []
+    if not path.exists():
+        return keys
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        token = line.split()[0]
+        if token and not token.startswith("#"):
+            keys.append(token)
+    return keys
+
+
+def _resolve_daytona_keys(config_path: Path, keys_file: Path | None = None) -> list[str]:
     runtime = MemoHarnessRuntimeConfig.from_json_file(config_path)
     keys: list[str] = []
+
+    # Optional explicit keys-file override (one key per line, # comments OK).
+    if keys_file is not None:
+        keys.extend(_read_key_file(keys_file))
+
     for raw in runtime.experiment.daytona.api_keys:
         if not raw:
             continue
@@ -81,6 +101,17 @@ def _http_request_json(api_key: str, method: str, url: str) -> object:
 
 
 def _list_sandboxes(client, api_key: str) -> list:
+    """List sandboxes for a key.
+
+    Two paths:
+    1. SDK client (preferred): iterate ``client.list()``. The installed
+       ``daytona`` SDK returns an ``Iterator[Sandbox]``; older SDKs returned
+       an object with ``.items``. We detect the shape at runtime so we keep
+       working across SDK versions.
+    2. HTTP fallback (when SDK is not importable): call the REST endpoint
+       ``GET /api/sandbox`` directly and read ``items`` out of the JSON
+       payload.
+    """
     if client is None:
         payload = _http_request_json(api_key, "GET", "https://app.daytona.io/api/sandbox")
         if isinstance(payload, dict):
@@ -93,20 +124,50 @@ def _list_sandboxes(client, api_key: str) -> list:
             raise RuntimeError("Unexpected Daytona API response: missing sandbox items.")
         return list(items)
 
-    all_items: list = []
-    page = 1
-    limit = 200
-    while True:
-        result = client.list(page=page, limit=limit)
-        items = getattr(result, "items", None)
-        if items is None:
-            raise RuntimeError("Unexpected Daytona list() response: missing 'items'.")
-        batch = list(items)
-        all_items.extend(batch)
-        if len(batch) < limit:
-            break
-        page += 1
-    return all_items
+    # Modern SDK (returns Iterator[Sandbox] from list()).
+    import inspect as _inspect
+
+    list_sig = _inspect.signature(client.list)
+    accepts_kwargs = any(
+        p.kind in (p.VAR_KEYWORD, p.KEYWORD_ONLY)
+        for p in list_sig.parameters.values()
+    ) or any(
+        p.kind == p.VAR_KEYWORD for p in list_sig.parameters.values()
+    )
+    accepts_page = "page" in list_sig.parameters or accepts_kwargs
+
+    # Legacy path: list(page=, limit=) returned an object with .items.
+    if accepts_page:
+        all_items: list = []
+        page = 1
+        limit = 200
+        while True:
+            result = client.list(page=page, limit=limit)
+            items = getattr(result, "items", None)
+            if items is None:
+                raise RuntimeError(
+                    "Unexpected Daytona list() response: missing 'items'."
+                )
+            batch = list(items)
+            all_items.extend(batch)
+            if len(batch) < limit:
+                break
+            page += 1
+        return all_items
+
+    # Modern path: list() returns an Iterator yielding Sandbox objects directly.
+    # Iterating the generator runs the SDK code, which will raise
+    # DaytonaError/TypeError up front if the kwargs are wrong; we don't
+    # pre-check, just iterate.
+    try:
+        return list(client.list())
+    except TypeError as exc:
+        # Be defensive: if user passed kwargs even though we tried not to,
+        # retry without any args. (No-arg list() returns *all* sandboxes
+        # for the key — server-side pagination handles the rest.)
+        raise RuntimeError(
+            f"Daytona.list() signature not supported by installed SDK: {exc}"
+        ) from exc
 
 
 def _sandbox_label(sandbox) -> str:
@@ -177,6 +238,14 @@ def _report_cross_key_duplicate_sandboxes(
 
 
 def _delete_sandbox(client, api_key: str, sandbox, timeout: float) -> None:
+    """Delete one sandbox.
+
+    Strategies, in order:
+    1. Sandbox object with ``.delete(timeout=, wait=)`` (modern SDK).
+    2. Top-level ``client.delete(sandbox)`` or ``client.delete(sandbox.id)``
+       (legacy SDK API).
+    3. HTTP fallback when no client is available.
+    """
     if client is None:
         if not isinstance(sandbox, dict) or not sandbox.get("id"):
             raise RuntimeError("Cannot delete sandbox without an id.")
@@ -184,7 +253,81 @@ def _delete_sandbox(client, api_key: str, sandbox, timeout: float) -> None:
         _http_request_json(api_key, "DELETE", f"https://app.daytona.io/api/sandbox/{sandbox_id}")
         return
 
-    sandbox.delete(timeout=timeout)
+    last_exc: Exception | None = None
+
+    # Modern SDK: Sandbox.delete(timeout=, wait=)
+    delete_method = getattr(sandbox, "delete", None)
+    if callable(delete_method):
+        import inspect as _inspect
+
+        try:
+            sig = _inspect.signature(delete_method)
+        except (ValueError, TypeError):
+            sig = None
+        try:
+            if sig is not None and "timeout" in sig.parameters:
+                if "wait" in sig.parameters:
+                    delete_method(timeout=timeout, wait=False)
+                else:
+                    delete_method(timeout=timeout)
+            else:
+                delete_method()
+            return
+        except Exception as exc:
+            # Already-gone sandboxes (DESTROYED/ERROR state) often raise
+            # DaytonaNotFoundError; treat as success since the sandbox is
+            # effectively deleted from our perspective.
+            exc_name = type(exc).__name__
+            if "NotFound" in exc_name or "404" in str(exc) or "not found" in str(exc).lower():
+                return
+            last_exc = exc
+        else:
+            return
+
+    # Legacy SDK: client.delete(sandbox) — the new SDK also exposes
+    # Daytona.delete(sandbox: 'Sandbox', timeout=, wait=), so passing the
+    # whole sandbox object (NOT the string id) is the right call.
+    client_delete = getattr(client, "delete", None)
+    if callable(client_delete):
+        import inspect as _inspect
+
+        try:
+            c_sig = _inspect.signature(client_delete)
+        except (ValueError, TypeError):
+            c_sig = None
+        try:
+            kwargs: dict = {}
+            if c_sig is not None:
+                if "timeout" in c_sig.parameters:
+                    kwargs["timeout"] = timeout
+                if "wait" in c_sig.parameters:
+                    kwargs["wait"] = False
+            client_delete(sandbox, **kwargs)
+            return
+        except Exception as exc:
+            exc_name = type(exc).__name__
+            if "NotFound" in exc_name or "404" in str(exc) or "not found" in str(exc).lower():
+                return
+            last_exc = exc
+
+    # Last resort: HTTP fallback using the already-resolved sandbox id.
+    sandbox_id = getattr(sandbox, "id", None)
+    if sandbox_id is None and isinstance(sandbox, dict):
+        sandbox_id = sandbox.get("id")
+    if sandbox_id is None:
+        raise RuntimeError("Cannot delete sandbox without an id.")
+    sandbox_id_q = urllib.parse.quote(str(sandbox_id), safe="")
+    try:
+        _http_request_json(api_key, "DELETE", f"https://app.daytona.io/api/sandbox/{sandbox_id_q}")
+        return
+    except Exception as exc:
+        # 404 from the REST endpoint usually means the sandbox is already
+        # gone on the server side. Treat as success.
+        if "404" in str(exc) or "Not Found" in str(exc) or "not found" in str(exc).lower():
+            return
+        raise RuntimeError(
+            f"Failed to delete sandbox {sandbox_id!r}: {exc} (prior SDK error: {last_exc})"
+        ) from exc
 
 
 def delete_all_sandboxes(
@@ -192,8 +335,9 @@ def delete_all_sandboxes(
     timeout: float,
     *,
     check_duplicates_only: bool = False,
+    keys_file: Path | None = None,
 ) -> int:
-    keys = _resolve_daytona_keys(config_path)
+    keys = _resolve_daytona_keys(config_path, keys_file=keys_file)
     if not keys:
         raise SystemExit(f"No Daytona API keys found in {config_path}")
 
@@ -272,11 +416,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only check for identical sandboxes across keys, do not delete.",
     )
+    parser.add_argument(
+        "--keys-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional text file with one Daytona API key per line "
+            "(# comments allowed). Keys are appended to those in --config; "
+            "use this to clean up keys stored in scripts/daytona_keys.txt."
+        ),
+    )
     args = parser.parse_args(argv)
+    keys_file = args.keys_file.resolve() if args.keys_file is not None else None
     return delete_all_sandboxes(
         Path(args.config).resolve(),
         timeout=args.timeout,
         check_duplicates_only=args.check_duplicates_only,
+        keys_file=keys_file,
     )
 
 

@@ -74,11 +74,13 @@ class HarnessSettings:
     controller_timeout_seconds: float = 900.0
     controller_recent_iterations: int = 2
     controller_env: dict[str, str] = field(default_factory=dict)
-    controller_canary_enabled: bool = False
-    controller_canary_task_count: int = 3
-    controller_canary_min_reward_delta: float = -0.02
+    controller_canary_enabled: bool = True
+    controller_canary_task_count: int = 6
+    controller_canary_min_reward_delta: float = -0.34
     controller_canary_max_blocker_increase: int = 0
+    controller_canary_tasks: list[str] = field(default_factory=list)
     best_harness_selection_modes: list[str] = field(default_factory=lambda: ["mean_reward"])
+    best_harness_iteration_floor: int = 0
     test_time_case_adaptation: bool = False
     iterations: int = 8
     primary_metric: str = "accuracy"
@@ -142,6 +144,9 @@ class DaytonaConfig:
     stop_on_timeout_per_task: bool = False
     shard_timeout_seconds: float = 1800.0
     shard_kill_grace_seconds: float = 5.0
+    completed_exit_grace_seconds: float = 90.0
+    agent_timeout_watchdog_grace_seconds: float = 600.0
+    agent_timeout_verify_grace_seconds: float = 1800.0
     disk_limit_retry_limit: int = -1
     retry_wait_seconds: int = 60
     connectivity_retry_limit: int = 3
@@ -177,6 +182,25 @@ class DaytonaConfig:
         self.shard_kill_grace_seconds = float(self.shard_kill_grace_seconds)
         if self.shard_kill_grace_seconds <= 0:
             raise ValueError("experiment.daytona.shard_kill_grace_seconds must be positive")
+        self.completed_exit_grace_seconds = float(self.completed_exit_grace_seconds)
+        if self.completed_exit_grace_seconds < 0:
+            raise ValueError(
+                "experiment.daytona.completed_exit_grace_seconds must be >= 0"
+            )
+        self.agent_timeout_watchdog_grace_seconds = float(
+            self.agent_timeout_watchdog_grace_seconds
+        )
+        if self.agent_timeout_watchdog_grace_seconds < 0:
+            raise ValueError(
+                "experiment.daytona.agent_timeout_watchdog_grace_seconds must be >= 0"
+            )
+        self.agent_timeout_verify_grace_seconds = float(
+            self.agent_timeout_verify_grace_seconds
+        )
+        if self.agent_timeout_verify_grace_seconds < 0:
+            raise ValueError(
+                "experiment.daytona.agent_timeout_verify_grace_seconds must be >= 0"
+            )
 
 
 @dataclass

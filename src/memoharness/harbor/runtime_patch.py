@@ -10,6 +10,9 @@ _AGENT_TIMEOUT_ENV = "MEMOHARNESS_HARBOR_AGENT_TIMEOUT_SEC"
 _DISABLE_VERIFIER_RETRY_ENV = "MEMOHARNESS_DISABLE_HARBOR_VERIFIER_RETRY"
 _VERIFIER_TIMEOUT_ENV = "MEMOHARNESS_HARBOR_VERIFIER_TIMEOUT_SEC"
 _VERIFIER_ENV_OVERRIDES_ENV = "MEMOHARNESS_VERIFIER_ENV_OVERRIDES"
+_ENABLE_PATCH_ENV = "MEMOHARNESS_ENABLE_HARBOR_RUNTIME_PATCH"
+_DEADLINE_NOTICE_ENV = "MEMOHARNESS_AGENT_DEADLINE_NOTICE"
+_DEADLINE_RESERVE_ENV = "MEMOHARNESS_AGENT_DEADLINE_RESERVE_SEC"
 
 _PATCH_APPLIED = False
 _logger = logging.getLogger(__name__)
@@ -58,6 +61,58 @@ def _parse_verifier_env_overrides() -> dict[str, str]:
     return {str(k): str(v) for k, v in payload.items() if v is not None}
 
 
+
+_DEADLINE_TEMPLATE = """
+
+---
+## Wall-clock budget (harness-enforced, read this)
+
+Your agent session is killed automatically after {total:g} seconds of execution.
+If you are killed mid-work you score **zero**, even when the required files are
+already correct -- nothing is graded unless this session ends on its own.
+
+Run `date +%s` right now and remember it as T0.
+Re-check `date +%s` roughly every 10 tool calls.
+
+At T0+{soft:g}s ({reserve:g}s before the kill) STOP exploring and STOP opening new
+hypotheses, whatever state you are in, and spend the remaining time on:
+
+1. every artifact the task asks for exists at the exact required path, non-empty;
+2. anything required to stay running is started detached (`setsid` / `nohup ... &`)
+   so it survives this session, then confirmed answering from a *fresh* shell;
+3. build artifacts, binaries and temp files you created that the task did not ask
+   for are deleted -- some tasks assert on the exact directory contents;
+4. a short final summary.
+
+A tidy, partially-complete final state scores far better than being killed in the
+middle of an edit.
+---
+"""
+
+
+def _deadline_reserve_sec(total_sec: float) -> float:
+    configured = _env_float(_DEADLINE_RESERVE_ENV)
+    if configured is not None:
+        return min(configured, max(0.0, total_sec - 60.0))
+    # ~12% of the budget, clamped to a sane band.
+    return min(max(total_sec * 0.12, 120.0), 420.0, max(0.0, total_sec - 60.0))
+
+
+def _with_deadline_notice(instruction: str, timeout_sec) -> str:
+    try:
+        total = float(timeout_sec)
+    except (TypeError, ValueError):
+        return instruction
+    if total <= 60.0:
+        return instruction
+    reserve = _deadline_reserve_sec(total)
+    if reserve <= 0:
+        return instruction
+    return str(instruction) + _DEADLINE_TEMPLATE.format(
+        total=total, soft=total - reserve, reserve=reserve
+    )
+
+
 def _copy_callable_metadata(wrapper, target, *, default_name: str) -> None:
     wrapper.__name__ = getattr(target, "__name__", default_name)
     wrapper.__qualname__ = getattr(target, "__qualname__", wrapper.__qualname__)
@@ -89,15 +144,22 @@ def apply_runtime_patch() -> None:
     if _PATCH_APPLIED:
         return
 
+    if not _env_flag(_ENABLE_PATCH_ENV, default=True):
+        _logger.info("Harbor runtime patch disabled via %s.", _ENABLE_PATCH_ENV)
+        _PATCH_APPLIED = True
+        return
+
     agent_timeout_sec = _env_float(_AGENT_TIMEOUT_ENV)
     disable_verifier_retry = _env_flag(_DISABLE_VERIFIER_RETRY_ENV, default=False)
     verifier_timeout_sec = _env_float(_VERIFIER_TIMEOUT_ENV)
     verifier_env_overrides = _parse_verifier_env_overrides()
+    deadline_notice = _env_flag(_DEADLINE_NOTICE_ENV, default=True)
     if (
         agent_timeout_sec is None
         and verifier_timeout_sec is None
         and not disable_verifier_retry
         and not verifier_env_overrides
+        and not deadline_notice
     ):
         _PATCH_APPLIED = True
         return
@@ -128,6 +190,32 @@ def apply_runtime_patch() -> None:
             default_name="_execute_agent",
         )
         setattr(trial_cls, "_execute_agent", _patched_execute_agent)
+
+    # Tell the agent how much wall clock it has. Harbor only forwards
+    # ``agent_timeout_sec`` to the ORACLE agent, so a normal agent explores as
+    # if time were unbounded and gets killed mid-edit with nothing tidied up.
+    original_agent_phase = getattr(trial_cls, "_run_agent_phase", None)
+    if callable(original_agent_phase) and deadline_notice:
+        target = inspect.unwrap(original_agent_phase)
+
+        async def _patched_run_agent_phase(self, *args, _target=target, **kwargs):
+            timeout_sec = kwargs.get("timeout_sec")
+            instruction = kwargs.get("instruction")
+            if timeout_sec is not None and isinstance(instruction, str):
+                try:
+                    kwargs["instruction"] = _with_deadline_notice(instruction, timeout_sec)
+                except Exception:
+                    _logger.exception(
+                        "Failed to add the deadline notice; running with the raw instruction."
+                    )
+            return await _target(self, *args, **kwargs)
+
+        _copy_callable_metadata(
+            _patched_run_agent_phase,
+            target,
+            default_name="_run_agent_phase",
+        )
+        setattr(trial_cls, "_run_agent_phase", _patched_run_agent_phase)
 
     original_verify = getattr(trial_cls, "_verify_with_retry", None)
     if callable(original_verify) and (
@@ -213,4 +301,13 @@ def apply_runtime_patch() -> None:
         )
         setattr(trial_cls, "_verify_with_retry", _patched_verify_with_retry)
 
+    _logger.info(
+        "Harbor runtime patch applied: agent_timeout=%s verifier_timeout=%s "
+        "deadline_notice=%s disable_verifier_retry=%s verifier_env_overrides=%d",
+        agent_timeout_sec,
+        verifier_timeout_sec,
+        deadline_notice,
+        disable_verifier_retry,
+        len(verifier_env_overrides),
+    )
     _PATCH_APPLIED = True

@@ -1,17 +1,20 @@
 # Repo Playbook
 
 Use `./policy.json` as the authoritative D1-D6 summary.
-Use this file for stable AdaHarness execution heuristics that should survive iteration-to-iteration.
+Use this file for stable AdaHarness heuristics that should survive iteration-to-iteration.
 
-Current priorities:
-- Read `./policy.json` first, then use this playbook for stable execution heuristics.
-- D1 strategy: Capture the exact livecodebench contract before editing: parsing, indexing, ordering, tie-breaks, blank-output legality, impossible outputs, numeric bounds, and exact stdout formatting.
-- D2 strategy: Within the first three tool calls inspect the current solution and one bounded contract or verifier clue; then keep reads path-scoped, cap windows at 200 lines, avoid raw log dumps, and prefer one focused proof over broad exploration.
-- D4 strategy: Use a contract -> invariant -> adversarial case -> edit -> proof loop; after one disproved hypothesis or two low-signal reads, pivot toward impossible or default branches, blank-output traps, parity bugs, boundary math, duplicates, and winner-selection logic before rewriting.
-- D5 strategy: Keep only verifier-backed patterns: `calls=0` runs are unacceptable, TPM blowups come from oversized or repeated reads, and wrong outputs like `-1`, `0`, placeholder strings, or close numeric drift usually point to branch, boundary, or formatting bugs.
-- D6 strategy: Before finishing, leave a real inspect/edit/check trace, run the smallest proof that exercises the repaired invariant, verify exact stdout formatting, and return a terse file-plus-proof summary.
+Stable loop:
+- Contract first: extract required files/paths, output format/order, numeric bounds, and exact stdout/text constraints.
+- Reproduce first: run the exact failing producer/test command and capture the error signature.
+- Edit narrowly: one hypothesis class, one targeted edit, one proof check.
+- Gate before done: run verifier-facing checks again before final response.
 
-Distilled emphasis:
-- Recent distilled pressure is highest on D2 (2 pattern(s)); keep that dimension under active scrutiny.
-- Recent distilled pressure is highest on D4 (2 pattern(s)); keep that dimension under active scrutiny.
-- Recent distilled pressure is highest on D3 (1 pattern(s)); keep that dimension under active scrutiny.
+Iteration-16 priorities:
+- D6 hard artifact gate (dna-assembly, dna-insert, video-processing, model-extraction-relu-logits): exact failing command + `test -s` required paths + one predicate probe.
+- D4 repeated-process runtime lane (torch-pipeline-parallelism, torch-tensor-parallelism): after two identical process signatures, patch runner/entrypoint/args/env/build-target and prove smoke exit 0 before logic edits.
+- D4 one-test-left pivot (adaptive-rejection-sampler, query-optimize): after two unchanged signatures, switch hypothesis class and rerun only the failing test to confirm delta.
+
+Guardrails:
+- Keep tool reads/searches path-scoped and <=200 lines.
+- Avoid speculative rewrites on never-solved capability-limited tasks unless verifier evidence changes.
+- Do not rely on completion claims; rely on command outputs only.

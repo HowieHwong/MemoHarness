@@ -2,22 +2,31 @@
 <h3 align="center">Agent Harnesses That Learn from Experience</h3>
 
 <p align="center">
+  <a href="https://arxiv.org/abs/2607.14159"><img src="https://img.shields.io/badge/arXiv-2607.14159-B31B1B.svg?logo=arxiv&logoColor=white" alt="arXiv"></a> 
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Runtime-Harbor%20%2B%20Daytona-0A7E8C.svg" alt="Runtime">
-  <img src="https://img.shields.io/badge/Controller-Codex%20CLI-111827.svg" alt="Controller">
-  <br/>
+  <!-- <img src="https://img.shields.io/badge/Controller-Codex%20CLI-111827.svg" alt="Controller"> -->
+  <!-- <br/>
   <img src="https://img.shields.io/badge/Method-Training%20Search%20%2B%20Test--Time%20Adaptation-9333EA.svg" alt="Method">
   <img src="https://img.shields.io/badge/Selection-Correctness--First-F59E0B.svg" alt="Selection">
-  <img src="https://img.shields.io/badge/Benchmarks-Terminal--Bench%20%7C%20LiveCodeBench%20%7C%20FinanceAgent-2563EB.svg" alt="Benchmarks">
+  <img src="https://img.shields.io/badge/Benchmarks-Terminal--Bench%20%7C%20LiveCodeBench%20%7C%20FinanceAgent-2563EB.svg" alt="Benchmarks"> -->
+
 </p>
 
 <p align="center">
+  <a href="#news">News</a> |
   <a href="#overview">Overview</a> |
   <a href="#method-at-a-glance">Method</a> |
   <a href="#the-six-dimensional-harness-model-d1-d6">Dimensions</a> |
   <a href="#quick-start">Quick Start</a> |
   <a href="#outputs">Outputs</a>
 </p>
+
+---
+
+## News
+
+- **2026-07-28** — Maintenance update: fixed tool-use telemetry, trial result labelling, and timeout handling in the search loop, and added anti-overfitting constraints on the harness controller.
 
 ---
 
@@ -145,3 +154,18 @@ MemoHarness/
 │     └─ core/               # shared abstractions and data models
 └─ ...
 ```
+
+## Citation
+
+If you find our work helpful, please consider citing it:
+
+```bibtex
+@misc{huang2026memoharness,
+      title={MemoHarness: Agent Harnesses That Learn from Experience}, 
+      author={Yue Huang and Wenjie Wang and Han Bao and Yuchen Ma and Xiaonan Luo and Yi Nian and Haomin Zhuang and Zheyuan Liu and Yue Zhao and Xiangliang Zhang},
+      year={2026},
+      eprint={2607.14159},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={[https://arxiv.org/abs/2607.14159](https://arxiv.org/abs/2607.14159)}, 
+}

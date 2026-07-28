@@ -16,6 +16,10 @@ from ..runtime.codex_bundle import (
 )
 from .local_cli import CodexController
 
+# Characters allowed across AGENTS.override.md + policy.json. Sized just above
+# the best-generalizing bundle observed so far (~8.8k) to stop rule accretion.
+_BUNDLE_CHAR_BUDGET = 9000
+
 logger = logging.getLogger(__name__)
 
 
@@ -212,6 +216,8 @@ class CodexBundleController(CodexController):
         bank_summary = self._build_iteration_bank_summary(bank, iteration)
         recent_failures = self._build_recent_failure_excerpt(bank, iteration)
         signal_summary = self._build_iteration_signal_summary(bank, iteration)
+        task_history = self._build_task_history_matrix(bank, iteration)
+        bundle_budget = _BUNDLE_CHAR_BUDGET
         return dedent(
             f"""
             {self._controller_identity()}
@@ -239,6 +245,9 @@ class CodexBundleController(CodexController):
             ## Current Config Summary
             {json.dumps(current_config.as_dict(), indent=2)}
 
+            ## Per-Task History Across Iterations
+            {task_history}
+
             ## Current Iteration Experience Summary
             {bank_summary}
 
@@ -251,6 +260,22 @@ class CodexBundleController(CodexController):
             {self._targeted_supporting_evidence_doc()}
 
             {self._on_disk_state_doc()}
+
+            ## Hard Constraints On What You May Write
+            These come from measured outcomes across the iterations above, not style preference.
+
+            1. No self-certifying markers. Never instruct the agent to print or emit a completion
+               token (`..._OK`, `GATE_PASSED`, and similar). Nothing in the harness reads them.
+               Every failed run recorded so far still declared itself finished, so a claim is not
+               evidence. Ask for a concrete check whose output the verifier would accept instead.
+
+            2. Stay inside the bundle budget: AGENTS.override.md plus policy.json must total at
+               most {bundle_budget} characters. In this lineage the bundle that generalized best to
+               held-out tasks is also the smallest one; the rounds that only added text scored the
+               same or worse. If you add a rule, delete or merge another.
+
+            3. Prefer cutting a rule to adding one. Drop anything the evidence above does not
+               directly support, and say in your final status which rules you removed.
 
             Rewrite the Codex bundle files in place. Start from the current bundle files and the
             summarized iteration evidence below. Keep the bundle grounded, concise,

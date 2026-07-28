@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -118,7 +119,9 @@ class _TeeTextStream:
 
     def write_from_renderer(self, data):
         with self._lock:
-            return self._write_locked(data)
+            written = self._primary.write(data)
+            self._primary.flush()
+            return written
 
     def flush(self) -> None:
         with self._lock:
@@ -421,6 +424,11 @@ def _summarize_harbor_result_payload(payload: dict[str, Any]) -> str:
     n_trials = stats.get("n_trials")
     n_total_trials = payload.get("n_total_trials")
     n_errors = stats.get("n_errors")
+    completed_trials = stats.get("n_completed_trials")
+    errored_trials = stats.get("n_errored_trials")
+    running_trials = stats.get("n_running_trials")
+    pending_trials = stats.get("n_pending_trials")
+    cancelled_trials = stats.get("n_cancelled_trials")
     if isinstance(n_trials, int) and isinstance(n_total_trials, int):
         details.append(f"trials reported {n_trials}/{n_total_trials}")
     elif isinstance(n_trials, int):
@@ -429,12 +437,78 @@ def _summarize_harbor_result_payload(payload: dict[str, Any]) -> str:
         details.append(f"total trials {n_total_trials}")
     if isinstance(n_errors, int):
         details.append(f"errors {n_errors}")
+    lifecycle_counts = [
+        ("completed", completed_trials),
+        ("errored", errored_trials),
+        ("running", running_trials),
+        ("pending", pending_trials),
+        ("cancelled", cancelled_trials),
+    ]
+    lifecycle_summary = ", ".join(
+        f"{label}={value}"
+        for label, value in lifecycle_counts
+        if isinstance(value, int)
+    )
+    if lifecycle_summary:
+        details.append(lifecycle_summary)
     if exception_types:
         details.append(f"exception_types={', '.join(exception_types[:3])}")
     finished_at = str(payload.get("finished_at") or "").strip()
     if not details and finished_at:
         details.append(f"finished_at={finished_at}")
     return "; ".join(details)
+
+
+def _harbor_result_is_terminal(payload: dict[str, Any]) -> bool:
+    """Return whether Harbor's top-level result represents a finalized job."""
+    if not isinstance(payload, dict):
+        return False
+    if not str(payload.get("finished_at") or "").strip():
+        return False
+
+    stats = _as_dict(payload.get("stats"))
+    running = stats.get("n_running_trials")
+    pending = stats.get("n_pending_trials")
+    if isinstance(running, int) and running > 0:
+        return False
+    if isinstance(pending, int) and pending > 0:
+        return False
+
+    total = payload.get("n_total_trials")
+    if not isinstance(total, int):
+        return True
+    completed = stats.get("n_completed_trials")
+    errored = stats.get("n_errored_trials")
+    cancelled = stats.get("n_cancelled_trials")
+    terminal_count = sum(
+        value
+        for value in (completed, errored, cancelled)
+        if isinstance(value, int)
+    )
+    return terminal_count >= total
+
+
+def _job_result_is_terminal(job_dir: Path) -> bool:
+    result_path = job_dir / "result.json"
+    if not result_path.exists():
+        return False
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return _harbor_result_is_terminal(payload)
+
+
+def _trial_result_is_terminal(trial_dir: Path, payload: dict[str, Any]) -> bool:
+    if not str(payload.get("finished_at") or "").strip():
+        return False
+    _, reward_observed = _trial_reward_from_payload(payload, trial_dir=trial_dir)
+    exception_info = _as_dict(payload.get("exception_info"))
+    has_exception = bool(
+        str(exception_info.get("exception_type") or "").strip()
+        or str(exception_info.get("exception_message") or "").strip()
+    )
+    return reward_observed or has_exception
 
 
 def _latest_trial_exception_detail(job_dir: Path) -> str:
@@ -466,7 +540,13 @@ def _fallback_harbor_status(job_dir: Path, log_path: Path) -> Optional[dict[str,
         except (OSError, json.JSONDecodeError):
             payload = {}
         detail = _summarize_harbor_result_payload(payload)
-        status = {"stage": "completed"}
+        status = {
+            "stage": (
+                "completed"
+                if _harbor_result_is_terminal(payload)
+                else "running harbor"
+            )
+        }
         if detail:
             status["detail"] = detail
         return status
@@ -1148,7 +1228,24 @@ def _extract_signal_lines(text: str, max_lines: int = 3) -> list[str]:
 def _classify_trial_failure(summary: str, exception_type: str = "") -> tuple[str, bool]:
     lower = summary.lower()
     exc = exception_type.lower()
-    if exc == "daytonaerror" or "total disk limit exceeded" in lower or _contains_daytona_memory_limit(lower):
+    # Anything the provider owns -- suspended orgs, quota, a sandbox that never
+    # booted, an agent that could not be installed -- is an external blocker and
+    # is excluded from mean_reward by _filter_learning_results(). Matching only
+    # the exact string "daytonaerror" missed DaytonaAuthorizationError and the
+    # environment/setup timeouts, so those were scored as capability failures.
+    #
+    # AgentTimeoutError is deliberately NOT here: running out of wall clock is
+    # something the harness can control, and excusing it would let the bundle
+    # dodge hard tasks by stalling.
+    if (
+        exc.startswith("daytona")
+        or exc in {"environmentstarttimeouterror", "agentsetuptimeouterror"}
+        or "organization is suspended" in lower
+        or "depleted credits" in lower
+        or "environment start timed out" in lower
+        or "total disk limit exceeded" in lower
+        or _contains_daytona_memory_limit(lower)
+    ):
         return "D4", True
     if exc == "addtestsdirerror" or "failed to add tests directory" in lower:
         return "D4", True
@@ -1264,6 +1361,139 @@ def _append_analysis(detail: dict[str, Any], note: str) -> None:
     detail["analysis"] = f"{existing} {note}".strip() if existing else note
 
 
+def _extract_ctrf_summary(trial_dir: Path) -> str:
+    """Per-test results from the verifier's CTRF report.
+
+    The binary trial reward hides partial progress: "5 of 7 tests pass, failing
+    test_server_startup" is a completely different diagnosis from "everything
+    failed", and grepping test-stdout.txt for lines containing "error" cannot
+    tell them apart. CTRF is structured, so use it when present.
+    """
+    path = trial_dir / "verifier" / "ctrf.json"
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return ""
+    results = _as_dict(payload.get("results"))
+    summary = _as_dict(results.get("summary"))
+    tests = results.get("tests")
+    total = summary.get("tests")
+    passed = summary.get("passed")
+    if total is None and isinstance(tests, list):
+        total = len(tests)
+    if total is None:
+        return ""
+    failing: list[str] = []
+    if isinstance(tests, list):
+        for test in tests:
+            if not isinstance(test, dict):
+                continue
+            if str(test.get("status") or "").lower() != "passed":
+                name = str(test.get("name") or "").strip()
+                if name:
+                    failing.append(name.rsplit("::", 1)[-1])
+    parts = ["tests %s/%s passed" % (passed if passed is not None else "?", total)]
+    if failing:
+        shown = failing[:5]
+        suffix = " (+%d more)" % (len(failing) - len(shown)) if len(failing) > len(shown) else ""
+        parts.append("failing: " + ", ".join(shown) + suffix)
+    return "; ".join(parts)
+
+
+def _extract_codex_trajectory_telemetry(trial_dir: Path) -> dict[str, Any]:
+    """Recover real tool/LLM-call telemetry from the Codex agent trajectory.
+
+    Harbor's Codex integration never populates ``agent_result.metadata`` with
+    ``num_llm_calls``/``tools_invoked``, so every case reported ``calls=0
+    tools=0`` to the controller regardless of what the agent actually did.
+    The ATIF trajectory the agent writes does carry the real counts, so parse
+    it here and use it as the fallback source.
+    """
+    telemetry: dict[str, Any] = {}
+    trajectory_path = trial_dir / "agent" / "trajectory.json"
+    if not trajectory_path.exists():
+        return telemetry
+    try:
+        payload = json.loads(trajectory_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return telemetry
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        return telemetry
+
+    num_llm_calls = 0
+    tools_invoked: list[str] = []
+    commands: list[str] = []
+    failed_commands = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        num_llm_calls += int(step.get("llm_call_count") or 0)
+        for call in step.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            tools_invoked.append(str(call.get("function_name") or "tool"))
+            arguments = call.get("arguments")
+            if isinstance(arguments, dict):
+                command = arguments.get("cmd") or arguments.get("command")
+                if command:
+                    commands.append(re.sub(r"\s+", " ", str(command)).strip()[:400])
+        observation = step.get("observation")
+        if isinstance(observation, dict):
+            for result in observation.get("results") or []:
+                if not isinstance(result, dict):
+                    continue
+                match = re.search(
+                    r"Process exited with code (\d+)",
+                    str(result.get("content") or ""),
+                )
+                if match and match.group(1) != "0":
+                    failed_commands += 1
+
+    if not num_llm_calls and not tools_invoked:
+        return telemetry
+    telemetry["num_llm_calls"] = num_llm_calls or len(tools_invoked)
+    telemetry["tools_invoked"] = tools_invoked
+    telemetry["commands"] = commands
+    telemetry["num_failed_commands"] = failed_commands
+
+    # Behavioural features. "It failed" is not actionable; "it re-ran the same
+    # failing command 4 times, never edited a file, and still signed off as done"
+    # is. All of this is already in the trajectory -- it was just never read.
+    repeated = 0
+    if commands:
+        counts: dict[str, int] = {}
+        for command in commands:
+            counts[command] = counts.get(command, 0) + 1
+        repeated = max(counts.values())
+    first_edit = 0
+    for index, command in enumerate(commands, start=1):
+        if re.search(r"apply_patch|sed -i|\btee\b|cat >|>>|python3? - <<", command):
+            first_edit = index
+            break
+    messages = [
+        str(step.get("message") or "").strip()
+        for step in steps
+        if isinstance(step, dict) and step.get("source") == "agent"
+    ]
+    final_message = next((m for m in reversed(messages) if m), "")
+    claimed_success = bool(
+        re.search(
+            r"\b(done|complete[d]?|implemented|fixed|verified|all set|passing)\b",
+            final_message,
+            re.IGNORECASE,
+        )
+    )
+    telemetry["repeated_command_max"] = repeated
+    telemetry["first_edit_command_index"] = first_edit
+    telemetry["ended_claiming_success"] = claimed_success
+    telemetry["final_message"] = re.sub(r"\s+", " ", final_message)[:300]
+    telemetry["last_commands"] = commands[-3:]
+    return telemetry
+
+
 def _parse_trial_result(
     trial_result_path: Path,
     reward: float,
@@ -1289,14 +1519,41 @@ def _parse_trial_result(
     agent_result = _as_dict(data.get("agent_result"))
     metadata = _as_dict(agent_result.get("metadata"))
     detail["total_tokens"] = _extract_trial_total_tokens(agent_result, metadata, trial_dir)
-    detail["num_llm_calls"] = metadata.get("num_llm_calls") or 0
+    trajectory_telemetry = _extract_codex_trajectory_telemetry(trial_dir)
+    detail["num_llm_calls"] = (
+        metadata.get("num_llm_calls")
+        or trajectory_telemetry.get("num_llm_calls")
+        or 0
+    )
     detail["latency_ms"] = metadata.get("latency_ms") or 0
-    detail["tools_invoked"] = list(metadata.get("tools_invoked") or [])
+    detail["tools_invoked"] = list(
+        metadata.get("tools_invoked")
+        or trajectory_telemetry.get("tools_invoked")
+        or []
+    )
+    detail["commands_executed"] = list(trajectory_telemetry.get("commands") or [])
+    detail["num_failed_commands"] = int(
+        trajectory_telemetry.get("num_failed_commands") or 0
+    )
+    detail["ctrf_summary"] = _extract_ctrf_summary(trial_dir)
+    behaviour_bits = [
+        "cmds=%d" % len(detail["commands_executed"]),
+        "failed_cmds=%d" % detail["num_failed_commands"],
+        "max_repeat=%d" % int(trajectory_telemetry.get("repeated_command_max") or 0),
+        "first_edit_at=%s" % (trajectory_telemetry.get("first_edit_command_index") or "never"),
+        "claimed_done=%s" % ("YES" if trajectory_telemetry.get("ended_claiming_success") else "no"),
+    ]
+    last_commands = trajectory_telemetry.get("last_commands") or []
+    if last_commands:
+        behaviour_bits.append("last_cmd=%r" % last_commands[-1][:110])
+    behaviour_line = "behaviour: " + " ".join(behaviour_bits) if trajectory_telemetry else ""
     detail["intermediate_outputs"] = list(
         metadata.get("intermediate_outputs")
         or metadata.get("intermediates")
         or []
     )
+    if behaviour_line:
+        detail["intermediate_outputs"].insert(0, behaviour_line)
     detail["status_events"] = list(metadata.get("status_events") or [])
     detail["current_status"] = metadata.get("current_status") or None
     detail["final_output"] = metadata.get("final_output") or ""
@@ -1333,11 +1590,23 @@ def _parse_trial_result(
         if timeout_diagnostics:
             summary = f"{summary} | {timeout_diagnostics}" if summary else timeout_diagnostics
 
-    if reward >= 0.5 and not summary:
-        detail["analysis"] = (
-            f"Harbor reward={reward:.2f}; num_llm_calls={detail['num_llm_calls']}; "
-            f"tools={len(detail['tools_invoked'])}."
-        )
+    if reward >= 0.5:
+        # A solved trial has no exception, so the fallback scraper invents an
+        # "exception message" out of the trial log tail ("Collecting main
+        # service artifacts") and the old code let that flow into the failure
+        # branch -- every passing case was stored as "Verifier failure" with
+        # primary_dim=D4. Solved cases get their own summary instead.
+        solved_bits = [
+            f"Solved (reward={reward:.2f})",
+            f"calls={detail['num_llm_calls']}",
+            f"tools={len(detail['tools_invoked'])}",
+        ]
+        ctrf_solved = detail.get("ctrf_summary")
+        if ctrf_solved:
+            solved_bits.insert(1, str(ctrf_solved))
+        detail["analysis"] = "; ".join(solved_bits) + "."
+        detail["primary_dim"] = "D1"
+        detail["external_blocker"] = False
         return detail
 
     primary_dim, external_blocker = _classify_trial_failure(summary, exception_type)
@@ -1346,6 +1615,10 @@ def _parse_trial_result(
     if summary:
         prefix = "External blocker" if external_blocker else "Verifier failure"
         detail["analysis"] = f"{prefix}: {summary}"
+    ctrf_summary = detail.get("ctrf_summary")
+    if ctrf_summary:
+        existing = str(detail.get("analysis") or "").strip()
+        detail["analysis"] = f"[{ctrf_summary}] {existing}".strip()
     return detail
 
 
@@ -1704,25 +1977,71 @@ def _parse_partial_job_results(job_dir: Path) -> dict[str, dict[str, Any]]:
     return results
 
 
+def _tasks_with_written_result(job_dir: Path) -> set[str]:
+    """Task names whose trial already has a ``result.json`` on disk.
+
+    ``_observed_shard_terminal_tasks`` treats a bare ``exception.txt`` as
+    terminal, but Harbor writes that file the instant an agent times out and
+    only writes ``result.json`` after artifact collection and verification.
+    Deferred trials need this stricter signal to know when harbor is done.
+    """
+    written: set[str] = set()
+    for trial_dir in _trial_artifact_dirs(job_dir).values():
+        result_path = trial_dir / "result.json"
+        if not result_path.exists():
+            continue
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        written.add(_task_name_from_payload(payload, trial_dir=trial_dir))
+    return written
+
+
 def _observed_shard_terminal_tasks(
     job_dir: Path,
     task_names: list[str],
     *,
     extra_exception_tasks: Optional[set[str]] = None,
 ) -> tuple[set[str], set[str]]:
-    partial_results = _parse_partial_job_results(job_dir)
     terminal_tasks: set[str] = set()
     exception_tasks: set[str] = set()
 
-    for task_name in task_names:
-        result_key = _find_result_key_for_task(partial_results, task_name)
-        if result_key is None:
+    for trial_dir in _trial_artifact_dirs(job_dir).values():
+        result_path = trial_dir / "result.json"
+        payload: dict[str, Any] = {}
+        if result_path.exists():
+            try:
+                parsed = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                parsed = {}
+            if isinstance(parsed, dict):
+                payload = parsed
+
+        task_name = (
+            _task_name_from_payload(payload, trial_dir=trial_dir)
+            if payload
+            else _task_name_from_trial_artifacts(trial_dir)
+        )
+        if task_name not in task_names:
             continue
+
+        exception_text = _read_text_tail(trial_dir / "exception.txt", max_bytes=8192)
+        failed_log = _trial_log_reports_failure(trial_dir / "trial.log")
+        result_terminal = bool(payload) and _trial_result_is_terminal(trial_dir, payload)
+        if not result_terminal and not exception_text.strip() and not failed_log:
+            continue
+
         terminal_tasks.add(task_name)
-        detail = partial_results.get(result_key) or {}
-        if str(detail.get("exception_type") or "").strip() or str(
-            detail.get("exception_message") or ""
-        ).strip():
+        exception_info = _as_dict(payload.get("exception_info"))
+        if (
+            exception_text.strip()
+            or failed_log
+            or str(exception_info.get("exception_type") or "").strip()
+            or str(exception_info.get("exception_message") or "").strip()
+        ):
             exception_tasks.add(task_name)
 
     for task_name in extra_exception_tasks or set():
@@ -1896,7 +2215,9 @@ class HarborTrainingLoop:
         self.controller_canary_task_count = 3
         self.controller_canary_min_reward_delta = -0.02
         self.controller_canary_max_blocker_increase = 0
+        self.controller_canary_tasks: list[str] = []
         self.best_harness_selection_modes = [_BEST_HARNESS_MODE_MEAN_REWARD]
+        self.best_harness_iteration_floor = 0
         self.test_time_case_adaptation = False
 
         # jobs_dir defaults to jobs/<sanitized-dataset-name>/ so that runs for
@@ -2604,8 +2925,17 @@ class HarborTrainingLoop:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, iterations: int, *, eval_after_train: bool = False) -> None:
-        """Execute the full training loop for *iterations* rounds."""
+    def run(self, iterations: int, *, eval_after_train: bool = False, start_iteration: int = 1) -> None:
+        """Execute the full training loop for *iterations* rounds.
+
+        Args:
+            iterations: total number of iterations (inclusive upper bound).
+            eval_after_train: run held-out test eval after training.
+            start_iteration: 1-based starting iteration (resume support).
+                Defaults to 1. When > 1, iter_rewards / iter_perfect_success_counts /
+                iter_total_tokens are reconstructed from the existing ExperienceBank
+                so that best-harness selection sees prior iterations too.
+        """
         self._setup()
         self._split_tasks()
 
@@ -2614,7 +2944,29 @@ class HarborTrainingLoop:
         iter_perfect_success_counts: dict[int, int] = {}
         iter_total_tokens: dict[int, int] = {}
 
-        for iteration in range(1, iterations + 1):
+        if start_iteration > 1:
+            # Reconstruct prior per-iteration metrics from the bank so
+            # _select_best_harness at the end considers earlier iterations.
+            from collections import defaultdict
+            by_iter: dict[int, list] = defaultdict(list)
+            for entry in getattr(self._bank, "entries", ()) or ():
+                by_iter[int(entry.iteration)].append(entry)
+            for it, entries in by_iter.items():
+                if not entries:
+                    continue
+                rewards = [float(getattr(e, "primary_reward", 0.0)) for e in entries]
+                tokens = [int(getattr(getattr(e, "trajectory", None), "total_tokens", 0) or 0) for e in entries]
+                iter_rewards[it] = sum(rewards) / len(rewards) if rewards else 0.0
+                iter_perfect_success_counts[it] = sum(1 for r in rewards if r >= 0.5)
+                iter_total_tokens[it] = sum(tokens)
+            logger.info(
+                "Resumed run from iteration %d: loaded %d prior iteration(s) with rewards=%s",
+                start_iteration,
+                len(iter_rewards),
+                {k: round(v, 3) for k, v in sorted(iter_rewards.items())},
+            )
+
+        for iteration in range(start_iteration, iterations + 1):
             logger.info("=== Iteration %d / %d (training on %d tasks) ===",
                         iteration, iterations, len(self._train_tasks))
 
@@ -3043,6 +3395,14 @@ class HarborTrainingLoop:
         self.controller_canary_max_blocker_increase = max(
             0,
             int(getattr(runtime.harness, "controller_canary_max_blocker_increase", 0) or 0),
+        )
+        self.controller_canary_tasks = [
+            str(name).strip()
+            for name in (getattr(runtime.harness, "controller_canary_tasks", None) or [])
+            if str(name).strip()
+        ]
+        self.best_harness_iteration_floor = max(
+            0, int(getattr(runtime.harness, "best_harness_iteration_floor", 0) or 0)
         )
         self.best_harness_selection_modes = list(
             getattr(
@@ -3552,6 +3912,12 @@ class HarborTrainingLoop:
             "daytona_key": _mask_secret(daytona_key),
             "max_tasks_per_shard": self._daytona_cfg.max_tasks_per_shard,
             "shard_timeout_seconds": self._daytona_cfg.shard_timeout_seconds,
+            "completed_exit_grace_seconds": (
+                self._daytona_cfg.completed_exit_grace_seconds
+            ),
+            "agent_timeout_watchdog_grace_seconds": (
+                self._daytona_cfg.agent_timeout_watchdog_grace_seconds
+            ),
             "disable_harbor_verifier_retry": self.disable_harbor_verifier_retry,
             "env": {
                 "MEMOHARNESS_CONFIG": env["MEMOHARNESS_CONFIG"],
@@ -3646,6 +4012,7 @@ class HarborTrainingLoop:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                start_new_session=os.name != "nt",
             )
             last_phase = "starting harbor run"
             last_detail = ""
@@ -3654,8 +4021,36 @@ class HarborTrainingLoop:
             termination_phase: Optional[str] = None
             termination_detail: Optional[str] = None
             termination_reason: Optional[str] = None
+            completed_tasks_observed_at: Optional[float] = None
+            agent_timeout_observed_at: Optional[float] = None
+            deferred_verify_tasks: set[str] = set()
             shard_timeout_seconds = float(self._daytona_cfg.shard_timeout_seconds)
             shard_kill_grace_seconds = float(self._daytona_cfg.shard_kill_grace_seconds)
+            completed_exit_grace_seconds = float(
+                self._daytona_cfg.completed_exit_grace_seconds
+            )
+            agent_timeout_watchdog_grace_seconds = float(
+                self._daytona_cfg.agent_timeout_watchdog_grace_seconds
+            )
+            agent_timeout_verify_grace_seconds = float(
+                self._daytona_cfg.agent_timeout_verify_grace_seconds
+            )
+
+            def _signal_harbor(*, force: bool) -> None:
+                if os.name != "nt":
+                    try:
+                        process_group = os.getpgid(process.pid)
+                        os.killpg(
+                            process_group,
+                            signal.SIGKILL if force else signal.SIGTERM,
+                        )
+                        return
+                    except (OSError, ProcessLookupError):
+                        pass
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
 
             def _terminate_running_harbor(
                 *,
@@ -3671,12 +4066,12 @@ class HarborTrainingLoop:
                 termination_detail = detail
                 termination_reason = reason
                 logger.warning("%s | %s | %s", local_name, task_summary, warning_message)
-                process.terminate()
+                _signal_harbor(force=False)
                 try:
                     process.wait(timeout=wait_seconds)
                 except subprocess.TimeoutExpired:
                     logger.warning("%s | %s | %s", local_name, task_summary, kill_warning_message)
-                    process.kill()
+                    _signal_harbor(force=True)
                     process.wait(timeout=wait_seconds)
                 return process.poll()
 
@@ -3724,6 +4119,57 @@ class HarborTrainingLoop:
                                 timed_out_task or "(unknown task)",
                                 len(task_names),
                             )
+                        elif timeout_exception_type == "AgentTimeoutError":
+                            # Harbor's SingleStepTrial._run_agent() *catches*
+                            # AgentTimeoutError and still runs artifact collection
+                            # and the verifier, so a timed-out trial can legitimately
+                            # score. exception.txt lands the instant the agent is cut
+                            # off -- long before verification -- so terminating on
+                            # sight discarded the verifier result every single time.
+                            # Let harbor finish: the drain branch below fires as soon
+                            # as result.json appears, and this timer is only a
+                            # backstop for a harbor that never finalizes.
+                            if timed_out_task:
+                                deferred_verify_tasks.add(timed_out_task)
+                            if agent_timeout_observed_at is None:
+                                agent_timeout_observed_at = time.time()
+                                logger.info(
+                                    "%s | %s | detected %s for %s; letting harbor run "
+                                    "artifact collection + verification (backstop %s).",
+                                    local_name,
+                                    task_summary,
+                                    timeout_exception_type,
+                                    timed_out_task or "(unknown task)",
+                                    _format_elapsed_seconds(
+                                        agent_timeout_verify_grace_seconds
+                                    ),
+                                )
+                            verify_wait = time.time() - agent_timeout_observed_at
+                            if verify_wait >= agent_timeout_verify_grace_seconds:
+                                returncode = _terminate_running_harbor(
+                                    phase=(
+                                        f"terminated after {timeout_label} verify grace"
+                                    ),
+                                    detail=timed_out_task or "(unknown task)",
+                                    reason=(
+                                        f"{timeout_label} verify grace expired: "
+                                        f"{timed_out_task}"
+                                        if timed_out_task
+                                        else f"{timeout_label} verify grace expired"
+                                    ),
+                                    warning_message=(
+                                        "harbor did not finalize {0} within {1} of the "
+                                        "agent timeout; terminating harbor run.".format(
+                                            timed_out_task or "(unknown task)",
+                                            _format_elapsed_seconds(verify_wait),
+                                        )
+                                    ),
+                                    kill_warning_message=(
+                                        "harbor run did not exit after verify-grace "
+                                        "terminate(); killing process."
+                                    ),
+                                    wait_seconds=shard_kill_grace_seconds,
+                                )
                         else:
                             returncode = _terminate_running_harbor(
                                 phase=f"terminated after {timeout_label}",
@@ -3751,6 +4197,15 @@ class HarborTrainingLoop:
                             task_names,
                             extra_exception_tasks=observed_exception_tasks,
                         )
+                        if deferred_verify_tasks:
+                            # A deferred trial only has exception.txt so far;
+                            # harbor is still collecting artifacts and verifying.
+                            terminal_tasks -= (
+                                deferred_verify_tasks
+                                - _tasks_with_written_result(job_dir)
+                            )
+                        if _job_result_is_terminal(job_dir):
+                            terminal_tasks.update(task_names)
                         observed_exception_tasks.update(exception_tasks)
                         if observed_exception_tasks and len(terminal_tasks) >= len(task_names):
                             exception_summary = _summarize_task_names(
@@ -3775,6 +4230,67 @@ class HarborTrainingLoop:
                                 ),
                                 wait_seconds=5,
                             )
+                        elif len(terminal_tasks) >= len(task_names):
+                            if completed_tasks_observed_at is None:
+                                completed_tasks_observed_at = time.time()
+                                logger.info(
+                                    "%s | %s | all shard task results are terminal; "
+                                    "waiting up to %s for harbor to exit.",
+                                    local_name,
+                                    task_summary,
+                                    _format_elapsed_seconds(completed_exit_grace_seconds),
+                                )
+                            completed_wait = time.time() - completed_tasks_observed_at
+                            if completed_wait >= completed_exit_grace_seconds:
+                                returncode = _terminate_running_harbor(
+                                    phase="terminated after completed result drain",
+                                    detail=task_summary,
+                                    reason=(
+                                        "harbor exit drain timeout after all shard tasks "
+                                        "completed"
+                                    ),
+                                    warning_message=(
+                                        "all shard results were finalized but harbor did not "
+                                        "exit after {0}; terminating the stale launcher process."
+                                    ).format(_format_elapsed_seconds(completed_wait)),
+                                    kill_warning_message=(
+                                        "harbor run did not exit after completed-result "
+                                        "terminate(); killing process group."
+                                    ),
+                                    wait_seconds=shard_kill_grace_seconds,
+                                )
+                        else:
+                            completed_tasks_observed_at = None
+
+                    if (
+                        returncode is None
+                        and len(task_names) == 1
+                        and self.harbor_agent_timeout_seconds is not None
+                        and self.harbor_agent_timeout_seconds > 0
+                        and elapsed_now
+                        >= (
+                            self.harbor_agent_timeout_seconds
+                            + agent_timeout_watchdog_grace_seconds
+                        )
+                    ):
+                        watchdog_limit = (
+                            self.harbor_agent_timeout_seconds
+                            + agent_timeout_watchdog_grace_seconds
+                        )
+                        returncode = _terminate_running_harbor(
+                            phase="terminated after agent timeout watchdog",
+                            detail=task_names[0],
+                            reason=f"agent timeout watchdog: {task_names[0]}",
+                            warning_message=(
+                                "no terminal task artifact was observed after the configured "
+                                "agent timeout plus grace ({0}); terminating harbor run."
+                            ).format(_format_elapsed_seconds(watchdog_limit)),
+                            kill_warning_message=(
+                                "harbor run did not exit after agent-timeout watchdog "
+                                "terminate(); killing process group."
+                            ),
+                            wait_seconds=shard_kill_grace_seconds,
+                        )
 
                     if (
                         returncode is None
@@ -5124,6 +5640,24 @@ class HarborTrainingLoop:
             return []
         if not self._train_tasks:
             return []
+        # Prefer an explicitly configured canary set. Slicing the head of the
+        # train manifest tends to select tasks that always pass or always fail,
+        # which gives the gate no discriminative power at all.
+        if self.controller_canary_tasks:
+            known = set(self._train_tasks)
+            selected = [name for name in self.controller_canary_tasks if name in known]
+            missing = [name for name in self.controller_canary_tasks if name not in known]
+            if missing:
+                logger.warning(
+                    "Canary tasks not present in the train split, ignoring: %s",
+                    ", ".join(sorted(missing)),
+                )
+            if selected:
+                return selected[: self.controller_canary_task_count]
+            logger.warning(
+                "No configured canary task matched the train split; "
+                "falling back to the head of the train manifest."
+            )
         return list(self._train_tasks[: self.controller_canary_task_count])
 
     @staticmethod
@@ -5426,8 +5960,22 @@ class HarborTrainingLoop:
             _BEST_HARNESS_MODE_PERFECT_SUCCESS_COUNT: iter_perfect_success_counts,
         }
         selections: dict[str, dict[str, Any]] = {}
+        floor = getattr(self, "best_harness_iteration_floor", 0)
         for mode in self.best_harness_selection_modes:
             metric_values = metric_maps.get(mode) or {}
+            if floor:
+                # Iteration scores are reconstructed from the whole bank, so a
+                # resumed run would otherwise pick a bundle from an earlier
+                # lineage. The floor keeps the choice inside the lineage this
+                # run is actually evaluating.
+                kept = {k: v for k, v in metric_values.items() if int(k) >= floor}
+                if kept:
+                    metric_values = kept
+                else:
+                    logger.warning(
+                        "best_harness_iteration_floor=%d excluded every iteration; "
+                        "falling back to the full history.", floor,
+                    )
             if not metric_values:
                 continue
             token_map = iter_total_tokens or {}
@@ -5717,6 +6265,14 @@ def _build_arg_parser():
         help="Skip training: load the existing bank + split, run eval on test set only, then exit. "
              "Defaults to experiment.eval_only.",
     )
+    p.add_argument(
+        "--start-iteration",
+        type=int,
+        default=1,
+        dest="start_iteration",
+        help="1-based iteration to start training from (resume support). "
+             "When >1, prior iteration metrics are reconstructed from the bank.",
+    )
     return p
 
 
@@ -5788,7 +6344,8 @@ def main(argv=None) -> None:
     if eval_only:
         loop.run_eval_only()
     else:
-        loop.run(iterations, eval_after_train=eval_after_train)
+        start_iteration = int(getattr(args, "start_iteration", 1) or 1)
+        loop.run(iterations, eval_after_train=eval_after_train, start_iteration=start_iteration)
 
 
 if __name__ == "__main__":

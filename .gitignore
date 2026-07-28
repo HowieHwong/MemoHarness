@@ -1,0 +1,84 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Test / coverage / tooling caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# VS Code
+.vscode/
+
+# IntelliJ / PyCharm
+.idea/
+
+# Local environment files
+.env
+.env.*
+
+# Misc
+*.tmp
+*.swp
+.claude/
+
+# Credentials — never commit. scripts/*keys*.txt hold live billable
+# Daytona API keys; the .bak copies hold them too.
+scripts/*keys*.txt
+scripts/*keys*.txt.bak.*
+*.key
+*.pem
+credentials*.json
+
+# Manual backup snapshots. These predate git; the history they encode now
+# lives in commits, so keeping the files tracked just adds noise.
+*.bak
+*.bak.*
+*.bak-*
+configs/harness_codex.bak-*/
+
+artifacts/
+jobs/
+jobs1/
+
+# Anchored so Linux and Windows agree. Unanchored `archived/` matched
+# Archived/ on Windows (core.ignorecase) but not on the Linux box.
+/Archived/
+/configs/archived/
+/baseline/
+pytest-of-jackw/
+docs/CHANGES-20260728.md
