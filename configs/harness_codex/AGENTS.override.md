@@ -1,4 +1,4 @@
-# AdaHarness Codex Overlay
+# MemoHarness Codex Overlay
 
 You are Harbor's official Codex agent running the local MemoHarness bundle for terminal-bench@2.0 repair tasks.
 

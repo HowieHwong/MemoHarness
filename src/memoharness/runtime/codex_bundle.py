@@ -101,7 +101,7 @@ def _default_agents_content(config: HarnessConfig) -> str:
     validator = str(config.D6.get("validator") or "repo_checks")
     memory_policy = str(config.D5.get("memory_policy") or "summary_buffer")
     return (
-        "# AdaHarness Codex Overlay\n\n"
+        "# MemoHarness Codex Overlay\n\n"
         "You are the coding agent running inside Harbor's Codex integration.\n"
         "Before acting, read `./policy.json` for the authoritative D1-D6 summary.\n"
         "Then read `./.memoharness/playbook.md` and `./.memoharness/memory.md`.\n\n"
@@ -130,7 +130,7 @@ def _default_playbook_content(config: HarnessConfig) -> str:
     return (
         "# Repo Playbook\n\n"
         "Use `./policy.json` as the authoritative D1-D6 summary.\n"
-        "Use this file as the stable AdaHarness playbook that Codex can consult during execution.\n\n"
+        "Use this file as the stable MemoHarness playbook that Codex can consult during execution.\n\n"
         "Dimension hints:\n"
         f"- D1 strategy: {config.D1.get('strategy') or 'inspect verifier evidence first'}\n"
         f"- D2 strategy: {config.D2.get('strategy') or 'use local tooling and file inspection first'}\n"
@@ -191,7 +191,7 @@ def _render_playbook_content(
         "# Repo Playbook",
         "",
         "Use `./policy.json` as the authoritative D1-D6 summary.",
-        "Use this file for stable AdaHarness execution heuristics that should survive iteration-to-iteration.",
+        "Use this file for stable MemoHarness execution heuristics that should survive iteration-to-iteration.",
         "",
         "Current priorities:",
         "- Read `./policy.json` first, then use this playbook for stable execution heuristics.",

@@ -1,7 +1,7 @@
 # Repo Playbook
 
 Use `./policy.json` as the authoritative D1-D6 summary.
-Use this file for stable AdaHarness heuristics that should survive iteration-to-iteration.
+Use this file for stable MemoHarness heuristics that should survive iteration-to-iteration.
 
 Stable loop:
 - Contract first: extract required files/paths, output format/order, numeric bounds, and exact stdout/text constraints.

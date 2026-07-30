@@ -95,7 +95,7 @@ class CodexBundleController(CodexController):
             ## Project Brief
             MemoHarness is optimizing a Harbor Codex harness bundle instead of a free-form
             Python HarnessImpl. Harbor still runs the official Codex agent, but this bundle
-            controls the iterated AdaHarness policy through:
+            controls the iterated MemoHarness policy through:
             - AGENTS.override.md: primary task-scaffolding and execution rules
             - .memoharness/playbook.md: stable repo-level playbook
             - .memoharness/memory.md: rolling distilled memory

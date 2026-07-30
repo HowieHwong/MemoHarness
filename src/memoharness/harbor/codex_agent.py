@@ -1,4 +1,4 @@
-"""Thin wrapper around Harbor's official Codex agent with AdaHarness bundle sync."""
+"""Thin wrapper around Harbor's official Codex agent with MemoHarness bundle sync."""
 
 from __future__ import annotations
 
@@ -171,7 +171,7 @@ def _read_optional_bool_env(name: str, *, default: bool | None) -> bool | None:
 
 
 class MemoHarnessCodexAgent(_CodexBaseClass):
-    """Harbor Codex wrapper that syncs an iterated AdaHarness bundle into the sandbox."""
+    """Harbor Codex wrapper that syncs an iterated MemoHarness bundle into the sandbox."""
 
     def __init__(self, *args, **kwargs):
         if "prompt_template_path" not in kwargs:
