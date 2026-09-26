@@ -2,7 +2,6 @@
 <h3 align="center">Agent Harnesses That Learn from Experience</h3>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2607.14159"><img src="https://img.shields.io/badge/arXiv-2607.14159-B31B1B.svg?logo=arxiv&logoColor=white" alt="arXiv"></a> 
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Runtime-Harbor%20%2B%20Daytona-0A7E8C.svg" alt="Runtime">
   <!-- <img src="https://img.shields.io/badge/Controller-Codex%20CLI-111827.svg" alt="Controller"> -->
@@ -28,7 +27,6 @@
 
 - **2026-07-28** - Fixed tool-use telemetry, trial result labelling, and timeout handling in the search loop.
 
-- **2026-07-14** - Paper released on [arxiv](https://arxiv.org/abs/2607.14159)
 
 ---
 
